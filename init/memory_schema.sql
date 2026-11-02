@@ -8,7 +8,7 @@
 -- 使用：与 init/schema.sql 同库（codegenx），部署方手动执行。
 -- ============================================================
 
-use dagent;
+use dataagent;
 
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS memory_type_dict (

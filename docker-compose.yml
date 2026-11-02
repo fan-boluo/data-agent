@@ -12,6 +12,7 @@ networks:
     driver: bridge
 
 volumes:
+  mysql_data:        # MySQL 数据（用户类数据、记忆真源）
   pg_data:           # PostgreSQL 主库数据
   redis_data:        # Redis 持久化数据
   qdrant_data:       # Qdrant 向量数据
@@ -33,12 +34,15 @@ services:
       - ./backend/.env.example  # 提供默认值兜底
     environment:
       # Docker 网络内用 service 名访问，覆盖 .env 中的 127.0.0.1
+      MYSQL_HOST: mysql
       POSTGRES_HOST: postgres
       REDIS_HOST: redis
       QDRANT_URL: qdrant
     volumes:
       - codegenx_data:/data     # 看板 JSON / 会话快照 / chat_message 落盘
     depends_on:
+      mysql:
+        condition: service_healthy
       postgres:
         condition: service_healthy
       redis:
@@ -81,7 +85,40 @@ services:
       retries: 3
 
   # ═══════════════════════════════════════════════════════════
-  # ③ PostgreSQL（主业务库 + 语义层 + pgvector）
+  # ③ MySQL（用户类数据 + 记忆真源）
+  # ═══════════════════════════════════════════════════════════
+  mysql:
+    image: mysql:8.0
+    container_name: codegenx-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-change_me}
+      MYSQL_DATABASE: ${MYSQL_DB:-dataagent}
+      MYSQL_USER: ${MYSQL_USER:-user}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-change_me}
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-authentication-plugin=mysql_native_password
+    volumes:
+      - mysql_data:/var/lib/mysql
+      # 首次初始化（数据卷为空时）按文件名顺序自动执行：
+      #   01 建库建表 → 02 记忆表 → 03 初始化用户（admin / boluo123）
+      - ./init/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+      - ./init/memory_schema.sql:/docker-entrypoint-initdb.d/02_memory_schema.sql:ro
+      - ./init/seed.sql:/docker-entrypoint-initdb.d/03_seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - codegenx-net
+
+  # ═══════════════════════════════════════════════════════════
+  # ④ PostgreSQL（主业务库 + 语义层 + pgvector）
   # ═══════════════════════════════════════════════════════════
   postgres:
     image: pgvector/pgvector:pg16
@@ -94,8 +131,10 @@ services:
       TZ: Asia/Shanghai
     volumes:
       - pg_data:/var/lib/postgresql/data
-      # 如有初始化脚本（建库/建表/扩展），放在 ./init/postgres/ 下自动执行
-      # - ./init/postgres:/docker-entrypoint-initdb.d
+      # 首次初始化（数据卷为空时）按文件名顺序自动执行：
+      #   01 语义层 schema + pgvector → 02 监控 telemetry schema
+      - ./init/semantic_schema.sql:/docker-entrypoint-initdb.d/01_semantic_schema.sql:ro
+      - ./init/telemetry_schema.sql:/docker-entrypoint-initdb.d/02_telemetry_schema.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
       interval: 10s
@@ -105,7 +144,7 @@ services:
       - codegenx-net
 
   # ═══════════════════════════════════════════════════════════
-  # ④ Redis（缓存 + 限流）
+  # ⑤ Redis（缓存 + 限流）
   # ═══════════════════════════════════════════════════════════
   redis:
     image: redis:7-alpine
@@ -123,7 +162,7 @@ services:
       - codegenx-net
 
   # ═══════════════════════════════════════════════════════════
-  # ⑤ Qdrant（向量存储）
+  # ⑥ Qdrant（向量存储）
   # ═══════════════════════════════════════════════════════════
   qdrant:
     image: qdrant/qdrant:latest

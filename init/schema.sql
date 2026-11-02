@@ -1,8 +1,8 @@
 -- 创建库
-create database if not exists dagent;
+create database if not exists dataagent;
 
 -- 切换库
-use dagent;
+use dataagent;
 
 -- 以下是建表语句
 

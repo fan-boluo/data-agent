@@ -1,8 +1,8 @@
 # AI 数据分析平台
 
 AI 驱动数据应用快速交付平台，支持自然语言生成代码、数据分析、可视化报告，面向数据分析师。
-![img_1.png](img_1.png)
-
+![picture1.png](docs/picture1.png)
+![picture2.png](docs/picture2.png)![picture3.png](docs/picture3.png)
 ## 技术架构
 
 uv单体架构
@@ -35,8 +35,8 @@ uv单体架构
 | 数据库 | PostgreSQL 8.0 (SQLAlchemy + asyncpg 异步) |
 | 缓存 | Redis 7 |
 | 向量存储 | Qdrant |
-| 监控 | Prometheus + OpenTelemetry |
-| 容器化 | Docker Compose / Kubernetes |
+| 监控 | Prometheus |
+| 容器化 | Docker Compose |
 
 ## 基础设施
 
@@ -66,7 +66,7 @@ backend/src/codegenx/
 | **gateway** | `/api/*` | JWT 认证、限流（固定窗口 5/s）、IP 黑名单、SSE 事件总线 |
 | **user_service** | `/api/user/*` | 注册 / 登录 / 登出 / 用户信息（密码 MD5+盐加密） |
 | **app_service** | `/api/app/*` | 项目 CRUD、代码文件树、在线编辑（Monaco Editor）、脚本运行、数据库创建删除 |
-| **ai_service** | `/api/chat/*`、`/api/ai/*` | Agent 运行时（leader → 子智能体内联）、会话池、Hook 事件系统、三级记忆、全链路追踪 |
+| **ai_service** | `/api/chat/*`、`/api/ai/*` | Agent 运行时、会话池、Hook 事件系统、记忆、全链路追踪 |
 | **metrics** | `/metrics` | Prometheus 指标（无 `/api` 前缀，单独暴露） |
 
 ## 主要功能模块
@@ -94,7 +94,6 @@ backend/src/codegenx/
 - 会话监控面板（运行中/已完成/失败）
 - 告警规则与告警记录
 - Token 用量查询
-- 历史数据清理
 
 ### 用户与权限
 - 用户注册 / 登录（JWT）
@@ -110,29 +109,29 @@ backend/src/codegenx/
                         └────────┬────────┘
                                  │
               ┌──────────────────▼──────────────────┐
-              │           AgentRuntime               │
+              │           AutoPlanManager           │
               │  ┌─────────────────────────────────┐ │
               │  │         Dispatch Loop           │ │
               │  └───────────┬─────────────────────┘ │
-              │              │                        │
-              │  ┌───────────▼──────────┐             │
+              │              │                       │
+              │  ┌───────────▼──────────┐            │
               │  │     SessionPool      │ ← 会话池    │
-              │  │  (max 1000, TTL 1h)  │             │
-              │  └───────────┬──────────┘             │
-              │              │                        │
-              │  ┌───────────▼──────────┐             │
+              │  │  (max 1000, TTL 1h)  │            │
+              │  └───────────┬──────────┘            │
+              │              │                       │
+              │  ┌───────────▼──────────┐            │
               │  │   Turn Loop (≤50)    │ ← 多轮对话  │
-              │  │  ┌────────────────┐  │             │
+              │  │  ┌────────────────┐  │            │
               │  │  │ Context Builder│  │ ← 上下文    │
-              │  │  │ + Compaction   │  │   组装+压缩  │
-              │  │  └───────┬────────┘  │             │
-              │  │          ▼           │             │
-              │  │  ┌────────────────┐  │             │
-              │  │  │   LLM Client   │  │ ← 模型    │
-              │  │  │  + Recovery    │  │   容错重试   │
-              │  │  └───────┬────────┘  │             │
-              │  │          ▼           │             │
-              │  │  ┌────────────────┐  │             │
+              │  │  │ + Compaction   │  │    装+压缩  │
+              │  │  └───────┬────────┘  │            │
+              │  │          ▼           │            │
+              │  │  ┌────────────────┐  │            │
+              │  │  │   LLM Client   │  │ ← 模型      │
+              │  │  │  + Recovery    │  │   容错重试  │
+              │  │  └───────┬────────┘  │            │
+              │  │          ▼           │            │
+              │  │  ┌────────────────┐  │            │
               │  │  │ Tool Executor  │  │ ← 工具调用  │
               │  │  │ (14+ tools)    │  │             │
               │  │  └───────┬────────┘  │             │
@@ -146,17 +145,17 @@ backend/src/codegenx/
 
 | 组件 | 说明                                                                 |
 |---|--------------------------------------------------------------------|
-| **AgentRuntime** | 中央调度器，管理消息总线、会话池、工具注册、钩子系统                                         |
+| **AutoPlanManager** | 中央调度器，管理消息总线、会话池、工具注册、钩子系统                                         |
 | **SessionPool** | 内存会话池，最多 1000 个并发会话，空闲自动回收                                     |
 | **Turn Loop** | 多轮对话循环，限制每轮最大迭代次数，每次迭代组装上下文 → LLM 推理 → 工具调用                        |
 | **Context Builder** | 动态组装系统提示词 + 历史消息 + 工具结果，超长自动压缩                                     |
 | **LLM Client** | 基于 OpenAI 兼容协议，支持 DashScope / DeepSeek / Zhipu / vLLM / 自定义        |
-| **Tool System** | 20+ 工具：代码检查、CSV/MySQL 数据操作、文件读写、搜索（find/grep）、任务面板、子 Agent、Skill 加载 |
-| **Hook System** | 生命周期钩子：会话启停、轮次启停、LLM 前后、工具前后、错误处理                                  |
+| **Tool System** | 20+ 工具：代码检查、CSV/PostgreSQL 数据操作、文件读写、搜索（find/grep）、任务面板、子 Agent、Skill 加载 |
+| **Hook System** | 生命周期钩子：LLM 前后、工具前后、错误处理                                  |
 | **Memory** | 三级记忆：Hot（全局 MEMORY.md）、Warm（关键词召回主题文件）、Session（当前会话）               |
-| **Skill Runtime** | 可插拔技能系统：数据清洗、特征工程、建模、绘图、Python 分析、SQL 分析、报告生成                      |
+| **Skill ** | 技能：数据清洗、特征工程、建模、绘图、Python 分析、SQL 分析、报告生成  (待测试优化 TODO)                   |
 | **Task Board** | 会话内持久化任务面板，Agent 可自行规划/追踪子任务                                       |
-| **Monitor Pipeline** | 全链路追踪：会话录制 → Span 采集 → 指标计算 → 告警评估 → Prometheus 暴露                 |
+| **Trace System** | 全链路追踪：会话录制 → Span 采集 → 指标计算 → 告警评估 → Prometheus 暴露                 |
 
 
 ### 环境要求
@@ -165,12 +164,14 @@ python虚拟环境所在位置: .venv\Scripts\pyhton.exe
 
 - Python 3.12+
 - Node.js 20+
-- PostgreSQL 8.0
+- MySQL 8.0
+- PostgreSQL 16
 - Redis 7
 - Qdrant
 
-> 启动 PostgreSQL、Redis、Qdrant、Prometheus
-并修改配置文件中的参数为实际参数 ：
+> 启动 Mysql、PostgreSQL、Redis、Qdrant、Prometheus
+复制backend/.env.example为backend/.env.env,backend/config.json.example为config.json
+修改配置文件中的参数为实际参数 ：
  系统参数：backend/.env 
  智能体参数：backend/config.json
      选择默认使用的模型，并设置agents列表中的参数defaults=True,填写你需要的provider ，并在下面的providers列表中补充url及密钥
@@ -205,7 +206,7 @@ Ctrl+C 或关闭终端即可。
 
 ### Docker 部署（推荐用于生产）
 
-一键拉起全部服务（前端 + 后端 + PostgreSQL + Redis + Qdrant）：
+一键拉起全部服务（前端 + 后端 + MySQL + PostgreSQL + Redis + Qdrant）：
 
 ```bash
 # 1) 准备后端配置（必填项：数据库密码、JWT、LLM provider API Key）
@@ -214,29 +215,51 @@ cp backend/.env.example backend/.env
 
 # 2) 准备 compose 根目录变量
 cp .env.example .env
-# 编辑 .env 填入 POSTGRES_PASSWORD / REDIS_PASSWORD
+# 编辑 .env 填入 MYSQL_ROOT_PASSWORD / MYSQL_DB / MYSQL_USER / MYSQL_PASSWORD
+#            POSTGRES_PASSWORD / REDIS_PASSWORD
 
 # 3) 构建并启动（首次 build 较慢，后续 compose 会复用镜像层）
 docker compose up -d --build
 
-# 4) 查看运行状态
+# 4) 等待数据库健康后，查看初始化结果
+#    首次启动（数据卷为空）会自动按顺序执行 init/ 下脚本：
+#      MySQL    : 01_schema.sql（建库 dataagent + 用户/项目等表）
+#                 → 02_memory_schema.sql（记忆系统表）
+#                 → 03_seed.sql（初始化 admin 用户，密码 boluo123）
+#      PostgreSQL: 01_semantic_schema.sql（语义层 + pgvector）
+#                 → 02_telemetry_schema.sql（监控 telemetry）
+docker compose logs mysql | Select-String "initdb"     # PowerShell 查看初始化日志
+docker compose exec -T mysql mysql -uroot -p"<root密码>" -e "select userAccount,userRole from dataagent.user;"
+
+# 5) 已有数据卷 / 手动补跑初始化脚本（自动化入口只在空库时执行一次）
+docker compose exec -T mysql mysql -uroot -p"<root密码>" < init/schema.sql
+docker compose exec -T mysql mysql -uroot -p"<root密码>" < init/memory_schema.sql
+docker compose exec -T mysql mysql -uroot -p"<root密码>" < init/seed.sql
+docker compose exec -T postgres psql -U postgres -f - < init/semantic_schema.sql
+docker compose exec -T postgres psql -U postgres -f - < init/telemetry_schema.sql
+
+# 6) 查看运行状态
 docker compose ps
 docker compose logs -f backend        # 看后端日志
 docker compose logs -f frontend       # 看前端 Nginx 日志
 
-# 5) 访问
+# 7) 访问
 #    前端：http://localhost
 #    API 健康检查：http://localhost/api/health
 #    Prometheus 指标：http://localhost/metrics
 
-# 6) 停止并清理（注意 -v 会清空数据卷，谨慎使用）
+# 8) 停止并清理（注意 -v 会清空数据卷，谨慎使用）
 docker compose down
 docker compose down -v                # 彻底清除数据（仅调试阶段用）
 
-# 7) 重新构建某个服务（代码更新后）
+# 9) 重新构建某个服务（代码更新后）
 docker compose up -d --build backend
 docker compose up -d --build frontend
 ```
+
+> **初始化说明**
+> - 自动初始化仅在数据卷为空时触发；若服务已启动过，请按第 5 步手动补跑。
+> - `seed.sql` 内置管理员 `admin / boluo123`，**上线前务必修改密码**。
 
 #### 容器说明
 
@@ -244,16 +267,18 @@ docker compose up -d --build frontend
 |---|---|---|---|
 | **frontend** | `codegenx-frontend` (nginx:alpine) | 80（可改 FRONTEND_PORT） | 托管 Vite 构建产物，反向代理 `/api` → backend |
 | **backend** | `codegenx-backend` (python:3.12-slim) | 内部 8456 | FastAPI + uvicorn，只在 compose 网络内暴露 |
+| **mysql** | `mysql:8.0` | 内部 3306 | 用户类数据 + 记忆真源（utf8mb4） |
 | **postgres** | `pgvector/pgvector:pg16` | 内部 5432 | 主业务库 + 语义层 + pgvector 扩展 |
 | **redis** | `redis:7-alpine` | 内部 6379 | 缓存 + 限流 |
 | **qdrant** | `qdrant/qdrant` | 内部 6333 | 向量存储（记忆 + 语义检索） |
 
 #### 数据持久化
 
-compose 定义了 4 个 named volume，容器重建不会丢数据：
+compose 定义了 5 个 named volume，容器重建不会丢数据：
 
 | Volume | 挂载路径 | 内容 |
 |---|---|---|
+| `mysql_data` | `/var/lib/mysql` | MySQL 数据（用户类数据、记忆真源） |
 | `pg_data` | `/var/lib/postgresql/data` | PostgreSQL 主库 |
 | `redis_data` | `/data` | Redis AOF 持久化 |
 | `qdrant_data` | `/qdrant/storage` | Qdrant 向量数据 |
@@ -264,10 +289,16 @@ compose 定义了 4 个 named volume，容器重建不会丢数据：
 #### 目录结构
 
 ```
-CodeGenX/
+DataAgent/
 ├── docker-compose.yml            # 一键编排（根目录）
-├── .env.example                  # compose 根变量（POSTGRES_PASSWORD 等）
+├── .env.example                  # compose 根变量（MYSQL_* / POSTGRES_* 等）
 ├── .dockerignore                 # 根目录构建忽略
+├── init/                         # 数据库初始化脚本（首次启动自动执行）
+│   ├── schema.sql                # MySQL：建库 dataagent + 业务表
+│   ├── memory_schema.sql         # MySQL：记忆系统表
+│   ├── seed.sql                  # MySQL：初始化 admin 用户
+│   ├── semantic_schema.sql       # PostgreSQL：语义层 + pgvector
+│   └── telemetry_schema.sql      # PostgreSQL：监控 telemetry
 │
 ├── backend/
 │   ├── Dockerfile                # 后端多阶段构建（python:3.12-slim 运行）
@@ -286,10 +317,11 @@ CodeGenX/
 #### 生产部署检查清单
 
 - [ ] 后端 `backend/.env` 中 `JWT_ALGORITHM=RS256`，配好私钥路径（不要用 HS256 对称密钥）
-- [ ] `POSTGRES_PASSWORD` / `REDIS_PASSWORD` / `JWT_SECRET` 改掉默认值
+- [ ] `MYSQL_ROOT_PASSWORD` / `MYSQL_PASSWORD` / `POSTGRES_PASSWORD` / `REDIS_PASSWORD` / `JWT_SECRET` 改掉默认值
 - [ ] 后端 `config.json` 中的 LLM provider API Key 已填入
 - [ ] 配置 HTTPS（Nginx 加 SSL 或前置 LB）
-- [ ] 数据库初始化脚本（如果有 DDL 初始化）放到 `init/postgres/` 下，compose 会自动执行
+- [ ] 数据库初始化脚本已随 compose 首次启动自动执行（MySQL: schema → memory_schema → seed；PG: semantic → telemetry）
+- [ ] 管理员默认密码 `boluo123` 已修改（seed.sql 初始化）
 - [ ] 日志持久化（Docker 日志默认在 `/var/lib/docker/containers/`，建议配日志驱动）
 
 ## 其它详细设计说明
