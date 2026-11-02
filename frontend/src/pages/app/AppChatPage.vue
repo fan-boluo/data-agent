@@ -432,6 +432,18 @@
             :disabled="isGenerating || !canOperateApp"
             class="chat-input"
           />
+          <!-- 数据集选择：默认未选择（agent 分不清时会反问） -->
+          <div v-if="datasets.length" class="input-toolbar">
+            <a-select
+              v-model:value="currentDb"
+              :options="datasets"
+              :placeholder="'未选择数据集'"
+              :disabled="isGenerating || !canOperateApp"
+              allow-clear
+              size="small"
+              class="dataset-select"
+            />
+          </div>
           <div class="input-actions">
             <a-button v-if="isGenerating" danger @click="stopGeneration" :loading="isStoppingGeneration" size="small">
               <template #icon><StopOutlined /></template>
@@ -612,6 +624,10 @@ const openedChatsStore = useOpenedChatsStore()
 const appInfo = ref<API.AppVO>({})
 const appId = ref<string>()
 const sessionId = ref('')
+
+// 可选数据集（后端 /api/ai/datasets 返回）；为空时不展示选择器
+const datasets = ref<Array<{ value: string; label: string }>>([])
+const currentDb = ref<string | undefined>(undefined)
 
 // 分析链路：按 session 内存缓存（页面刷新后清空，后端不持久化）
 const analysisTraceMap = ref<Map<string, AnalysisStep[]>>(new Map())
@@ -1866,6 +1882,18 @@ const clearActiveGeneration = (requestId?: string) => {
   isStoppingGeneration.value = false
 }
 
+const fetchDatasets = async () => {
+  try {
+    const baseURL = request.defaults.baseURL || API_BASE_URL
+    const res = await fetch(`${baseURL}/api/ai/datasets`, { headers: { ...getAuthHeaders() } })
+    if (!res.ok) return
+    const json = await res.json()
+    if (Array.isArray(json?.data)) datasets.value = json.data
+  } catch (error) {
+    console.error('获取数据集列表失败：', error)
+  }
+}
+
 const fetchAppInfo = async () => {
   const id = props.appId
   if (!id) return
@@ -1893,6 +1921,7 @@ const fetchAppInfo = async () => {
       }
       await loadSourceTree()
       await loadDbTables()
+      await fetchDatasets()
       return
     }
     handleAppLoadFailure()
@@ -1951,7 +1980,7 @@ const generateCode = async (userMessage: string, aiMessageIndex: number) => {
     const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-      body: JSON.stringify({ appId: String(appId.value), message: userMessage, sessionId: currentSessionId, requestId, traceId: createClientId(), dbName: appInfo.value?.dbName || null }),
+      body: JSON.stringify({ appId: String(appId.value), message: userMessage, sessionId: currentSessionId, requestId, traceId: createClientId(), dbName: appInfo.value?.dbName || null, currentDb: currentDb.value || null }),
       signal: controller.signal,
     })
     if (!response.ok) { throw new Error(`HTTP ${response.status}`) }
@@ -2907,6 +2936,26 @@ onBeforeUnmount(() => {
   right: 8px;
   display: flex;
   gap: 8px;
+}
+
+/* 数据集选择器（输入框底部左侧，与发送按钮同行） */
+.input-toolbar {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  display: flex;
+  align-items: center;
+  max-width: calc(100% - 64px);
+}
+
+.dataset-select {
+  min-width: 170px;
+  max-width: 100%;
+}
+
+.dataset-select :deep(.ant-select-selector) {
+  border-radius: 999px;
+  background: var(--bg-surface);
 }
 
 /* Send button */

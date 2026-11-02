@@ -1,5 +1,5 @@
 -- ============================================================
--- 记忆系统表（v2.1，与 docs/Agent记忆系统设计方案v2.md §3.1 一致）
+-- 记忆系统表
 -- 存储栈：MySQL(唯一真源) + Qdrant(agent_memory_warm, 可重建检索层)
 -- 约定：id 类字段 VARCHAR(64)；时间 DATETIME(秒级)；
 --       字符集 utf8mb4 / utf8mb4_unicode_ci；不使用外键
@@ -8,7 +8,7 @@
 -- 使用：与 init/schema.sql 同库（codegenx），部署方手动执行。
 -- ============================================================
 
-use codegenx;
+use dagent;
 
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS memory_type_dict (

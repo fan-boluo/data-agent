@@ -85,8 +85,13 @@ class RuntimeSessionState:
 
     @property
     def available_schemas(self) -> list[str]:
-        """当前会话可问答的公共数据源列表（agent 仅基于这些公共库作答）。"""
+        """当前会话可问答的公共数据源白名单（格式 datasource.schema）。"""
         return list(getattr(self.request, "available_schemas", None) or [])
+
+    @property
+    def current_db(self) -> str | None:
+        """用户当前选择的数据集（datasource.schema）；未选择时为 None。"""
+        return getattr(self.request, "current_db", None)
 
     @property
     def user_id(self) -> str:

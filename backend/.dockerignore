@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# 本地环境（用 .env.example 替代）
+.env
+
+# IDE / 编辑器
+.vscode/
+.idea/
+*.swp
+
+# 日志
+logs/
+*.log
+
+# 测试
+tests/
+
+# Docker / CI
+Dockerfile
+.dockerignore
+.docker/
+
+# 运行时数据（生产用 volume 挂载）
+.data/

@@ -66,7 +66,7 @@ class LeaderAgent(BaseReActAgent):
             "回传结果出现矛盾时：最多派发一次口径明确的核实任务（一次性取全口径数据，描述必须与原任务不同），核实结果回填后必须直接汇总作答，禁止以格式不符等理由对同一智能体重复派发相同或相似任务。",
             "已派发过的任务不要重复派发：其执行结果已在对话中（工具结果），基于已有结果继续决策或汇总作答即可。",
         ],
-        resource_prompt="可用资源如下：\n 有权限文件夹:{{available_file_path}}\n有权限数据库:{{available_db}}",
+        resource_prompt="可用资源如下：\n 有权限文件夹:{{available_file_path}}\n数据集:{{available_db}}",
         expand_prompt=(
             "可用的智能体如下：\n{{agents_list_desc}}\n\n"
         ),
@@ -96,6 +96,21 @@ class LeaderAgent(BaseReActAgent):
         """预取记忆与摘要（expand 变量注入）后走基类组装；会话状态全程显式传参，实例不留 run 级字段。"""
         await super()._prepare_agent(request)
 
+    @staticmethod
+    def _db_hint(request: UserAIRequest) -> str:
+        """数据集提示：明确当前数据集，未选择时引导反问，禁止跨库查询。"""
+        current = str(getattr(request, "current_db", None) or "")
+        available = list(getattr(request, "available_schemas", None) or [])
+        if current:
+            others = [s for s in available if s != current]
+            hint = f"{current}（用户当前选择，本轮只在该数据集内查询，禁止跨库查询）"
+            if others:
+                hint += f"；其他可选数据集（仅当问题明显不匹配当前数据集时，提示用户切换）: {', '.join(others)}"
+            return hint
+        if available:
+            return f"（用户未选择数据集；如需查询数据，必须先反问用户选择其中一个: {', '.join(available)}）"
+        return "（无可用公共数据集）"
+
     async def _prepare_prompt_params(self,request) -> dict:
         """统一 prompt 变量：智能体清单（含 planner）+ 任务看板 + 记忆/摘要注入。"""
 
@@ -117,7 +132,7 @@ class LeaderAgent(BaseReActAgent):
 
         return {
             "available_file_path":get_code_dir(request.user_id,request.app_id),
-            "available_db": ", ".join(getattr(request, "available_schemas", None) or []),
+            "available_db": self._db_hint(request),
             "agents_list_desc": self.agents_list_desc(),
             "board_desc": self._context.get_task_bord(),
             "memory_prompt": _memory_prompt or "（暂无相关记忆）",

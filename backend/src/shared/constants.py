@@ -70,6 +70,10 @@ PYTHON_ENV = {
 # 所有用户项目共用同一个 PG 数据库，每个项目一个 schema
 ANALYSIS_DB = "analysis"
 # 公共数据集（所有用户可见），agent 仅基于这些公共库做问答
-# datasource 名需与 config.json databases 段及语义层 meta_datasource.name 一致
-PUBLIC_DATASOURCES = ["business"]
-PUBLIC_SCHEMAS = ["business.dvdrental"]
+# value 格式 datasource.schema，datasource 名即 PG database 名，需与语义层 meta_datasource.name 一致
+PUBLIC_DATASETS = [
+    {"value": "business.dvdrental", "label": "DVD 租赁示例库（dvdrental）"},
+    {"value": "tpcds_sf1.public", "label": "TPC-DS SF1 数仓"},
+]
+# 权限白名单（后续权限管控时按用户圈定）
+PUBLIC_SCHEMAS = [d["value"] for d in PUBLIC_DATASETS]

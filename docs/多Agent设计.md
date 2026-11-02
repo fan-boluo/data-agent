@@ -1,162 +1,281 @@
-# 多智能体数据分析系统 · 架构设计（当前实现版）
+# 多智能体架构设计
 
-> 本文档描述 **P1~P3 改造后** 的实际架构（并行派发 → 决策工具化 → 模板合一），
-> 是当前代码的设计契约与对照基准。原 LangGraph 方案与早期 AgentRuntime 方案均已废弃。
-> 遗留项见文末。
+> 版本：v2.0 · 2026-11-02
+> 核心变化：从多跳接力路由 → **单跳直通 + agent-as-tool 内联执行**
 
-## 1. 系统总览
+---
 
-- 调度入口：`AgentRuntime` 已退役，`AutoPlanManager`（agent/auto_plan_manager.py）是唯一调度循环
-- 跨 agent 路由：调度器主循环**直接方法接力**（`current_msg` 内存变量），无收件箱/队列，停止时无需 purge
-- MessageBus 职责收窄：仅用于用户请求 inbound 与 SSE 事件下发（`publish_runtime_event`），不承载 agent 间消息
-- 轮次上限：全局跨 agent 轮次取 `config.multi_agents.turn_max`（while 循环判断），超限 FORCE STOP；单 agent 内部 ReAct 步数取各自 `maxSteps`
-- 系统仅走多 agent 链路（无单 agent 退化路径）
+## 1. 架构总览
 
-核心目录：
+### 设计原则
+
+- **单跳直通**：调度循环只剩 `user → leader → user`，子智能体通过 `dispatch_agent` 工具**内联执行**（agent-as-tool），不再产生跨 agent 消息跳
+- **看板显式管理**：任务看板由 LLM 经 `task_create / task_update / task_get / task_list` 工具**主动管理**，派发无隐式看板副作用
+- **统一工具面**：leader 既能自己调工具，也能派发子智能体（`dispatch_agent` 是一个普通工具），还能派 planner 规划后逐步执行
+- **执行上下文真相源**：`SessionContext.chat_messages` 是会话历史唯一真相源（供 LLM 读取 + 子智能体结果内联写入）
+
+### 核心目录
 
 ```
 backend/src/codegenx/ai_service/
 ├── agent/
-│   ├── auto_plan_manager.py      # 调度循环 + _execute_batch 并行执行
-│   ├── runtime_schema.py         # RuntimeSessionState / ActivateTurn / TurnStoppedError / stop_signal
-│   └── agents/
-│       ├── agent.py              # AgentMessage 扁平协议
-│       ├── base_react_agent.py   # ReAct 循环 + 原生 tool_calls + _reply 回传出口 + 失败兜底
-│       ├── intention_agent.py    # SupervisorAgent（编排入口）
-│       ├── supervisor_board.py   # TaskBoardCoordinator（看板协调）
-│       └── data_explore_agent.py / csv_explore_agent.py / planner ...
-├── context/session_context.py    # chat_messages 会话历史真相源
-├── task/task_manager.py          # TaskBoardService（按 request 落盘）
-├── session/session_pool.py       # 会话池（idle 回收 + 停止逻辑下沉）
-├── tools/                        # execute_sql / list_csv_files / run_python / 决策工具描述符
-├── tool_executor.py              # ToolExecutor 统一执行回填
-└── tool_handler.py               # ToolRegistry + build_agent_tools 白名单
+│   ├── auto_plan_manager.py         # 请求执行入口（单跳直通 user→leader）
+│   ├── runtime_schema.py            # RuntimeSessionState / TurnStoppedError / stop_signal
+│   ├── agent_instances.py           # 组合根：initialize_agent_instances + _AGENT_CLASSES
+│   ├── agent_registry.py            # AgentRegistry + AgentSpec（规格注册表）
+│   ├── agent_schema.py              # AgentState / AgentEventType
+│   ├── tool_executor.py             # ToolExecutor（统一执行 + safe_path_guard hook）
+│   ├── tool_handler.py              # ToolRegistry（启动扫描 + child_view 过滤）
+│   ├── agents/
+│   │   ├── agent.py                 # Agent 抽象基类 + AgentMessage
+│   │   ├── base_react_agent.py      # BaseReActAgent（ReAct 循环 + tool_calls）
+│   │   ├── leader_agent.py          # LeaderAgent（主控 + 编排入口）
+│   │   ├── plan_agent.py            # PlannerAgent（计划智能体）
+│   │   ├── data_explore_agent.py    # DateExploreAgent（数据探索）
+│   │   ├── csv_explore_agent.py     # CsvExploreAgent（CSV 探索）
+│   │   └── supervisor_board.py      # 看板协调（非 Agent，是 Leader 专用 Action）
+│   └── db/                          # 数据库管理器（mysql_manager / postgres_manager / docker_exec）
+├── tools/                           # 工具实现（继承 BaseTool + 约定式注册混合）
+├── context/session_context.py       # chat_messages 会话历史真相源
+├── task/task_manager.py             # TaskBoardService（按 request 落盘）
+├── session/session_pool.py          # 会话池（LRU + cleanup + stop_signal）
+└── hook/                            # Hook 事件系统
 ```
 
-## 2. 消息协议（AgentMessage 扁平一等字段）
+---
+
+## 2. 智能体清单
+
+| 智能体 | 定位 | 工具能力 | 是否注入会话历史 |
+|---|---|---|---|
+| **leader** | 主控：编排 + 直答 + 派发 | 全部工具（含 dispatch_agent + task_*） | ✅ 注入 `chat_messages[:-1]` |
+| **planner** | 规划：拆解任务 + 登记看板 | 仅 task_* 工具（看板管理） | ❌ 任务自包含 |
+| **data_explore** | 数据探索：MySQL 查询 + 统计 | execute_sql / describe_table_stats / list_tables / describe_table / sample_rows | ❌ 任务自包含 |
+| **csv_explore** | CSV 探索：文件读取 + 统计 | describe_csv / sample_csv_rows / describe_csv_stats / list_csv_files | ❌ 任务自包含 |
+
+### 注册机制
+
+新增智能体只需三步：
+1. 实现 Agent 子类（继承 `BaseReActAgent`）
+2. 在类上声明 `profile`（PromptConfig 含 role / goal / constraints 等）
+3. 在 `agent_instances.py` 的 `_get_agent_classes()` 中添加该类
+
+启动时 `initialize_agent_instances()` 对每个类调用：
+1. `cls.resolve_agent_config()` — 按 `cls.name` 从 config.json 匹配配置（模型链、max_steps、tools 白名单）
+2. `cls.register()` — 构建 `AgentSpec`（id / role / name / desc / cls）注册到 `AgentRegistry`
+
+config.json 中 `agents[].tools` 白名单决定该智能体能用哪些工具，由 `ToolRegistry.build_agent_tools(allowlist)` 过滤产出 function-calling 目录。
+
+---
+
+## 3. AgentMessage 协议
+
+扁平一等字段，跨智能体消息统一格式：
 
 | 字段 | 语义 |
 |---|---|
-| `task` | 派发跳=任务文本；回传跳保留原值（追溯） |
-| `result` | 回传跳=执行结果；终答跳（recipient="user"）=面向用户的答复 |
-| `task_id` / `step_id` | 看板闭环握手字段（派发下传、回传保留、直答清除） |
-| `direct_reply` | 直答标记（派发方打标、执行方消费） |
-| `dispatch_batch` | 批信封载荷（recipient=`__batch__` 时携带多个派发跳） |
-| `sender` / `recipient` / `success` | 每跳必设 |
+| `sender` / `recipient` | 每跳必设。leader 派发时 recipient 设为目标智能体名 |
+| `task` | 派发跳 = 任务文本；终答跳承载答复内容（与 result 协同） |
+| `result` | 终答跳 = 面向用户的答复文本 |
+| `request_id` / `session_id` | 贯穿始终，看板闭环握手 |
+| `success` | 执行结果状态，终答跳必设 |
 
-跳向语义契约：**派发跳填 task、回传跳填 result、终答跳填 result**。
-旧协议（NextMessageModel / MessagePayload / next/message dict）已删除，禁止复活。
+---
 
-## 3. BaseReActAgent（执行型智能体基类）
+## 4. 执行型智能体（BaseReActAgent）
 
 ### ReAct 循环
-`think → act/tool_calls → observation → verify`，循环边界为 observation 返回 `success=True` 或达到 `maxSteps`。
 
-- **observation 协议**：把入参消息**原地改造**为下一跳（必设 sender/recipient/success），`run()` 尾部直接返回 observation，不再新建消息
-- **_reply 统一回传出口**：回传调用方保留 task_id、清 direct_reply、task 保留原值；直答 user 清除 task_id/step_id 握手字段
-- **verify 失败兜底按调用方分流**：
-  - 入口 agent（sender=user，如 supervisor）→ 终答跳兜底（"执行失败，请稍后重试"）
-  - 执行 agent → **失败回传调用方**：task 保留原值、task_id/step_id 闭环握手保留、`result="执行失败：{reason}"`、`success=False`——supervisor 保留审查/重试/换路决策权，看板任务不悬挂 in_progress
+`think → LLM → tool_calls → observation`，循环边界：observation 返回终答跳 或 达到 `max_steps`。
 
-### 工具化执行
-- 工具白名单：`config.json agents[].tools` → `build_agent_tools`（白名单非空才启用 function calling；supervisor/planner 的决策工具除外，见 §4）
-- `_normalize_tool_call` 双格式归一化：非流式 OpenAI 嵌套格式与流式扁平格式统一
-- ToolExecutor 统一执行并回填 tool 消息（成功回传 data、失败回传 message，`MAX_TOOL_RESULT_CHARS=8000` 截断；`_success` 记账字段回填前 pop 不进 LLM API）
-- 工具执行结果固定 `ToolResult` 类型，仅按 `success` 字段判定状态
+- **think**：组装上下文（SystemPrompt + chat_messages 历史 + LLM 上次输出）→ 调 LLM
+- **act/tool_calls**：LLM 输出带 `tool_calls` → ToolExecutor 执行 → 结果作为 observation 进对话
+- **终答**：LLM 输出纯文本（无 tool_calls）→ 构造 `AgentMessage(recipient="user")` 返回
 
 ### 会话历史注入
-- 执行型 agent（data_explore/csv_explore）**默认不注入**（任务自包含：只看 task 文本）
-- Supervisor 覆盖注入 `chat_messages[:-1]`（末条内容由本轮输入承载，见 §4.5）
 
-## 4. Supervisor 编排
+- **leader**：注入 `chat_messages[:-1]`（末条内容由本轮输入承载）
+- **执行型 agent（data_explore / csv_explore / planner）**：**不注入**（任务自包含，只看 task 文本）
 
-三类拆分：**SupervisorAgent**（编排流程）/ **TaskBoardCoordinator**（看板确定性操作）。
-`profile` 必须为类属性（`register()` 是 classmethod 读 `cls.profile`）。
+### 任务自包含原则
 
-### 4.1 决策协议（P2 工具化）
-JSON 文本决策协议已退役，决策走 function-calling，两个**控制流工具**在 `SupervisorAgent._execute_tool_calls` 本地拦截执行（不走 ToolExecutor）：
+派发的 task 必须完全自包含——执行智能体看不到对话历史与其它任务，执行所需全部信息（文件名、数值、统计口径）必须直接写进 task。**跨数据源对比 / 汇总 / 结论生成是 leader 的职责**，禁止写进派发 task。
 
-- `dispatch_agent(agent, task, direct_reply?)`：登记看板 + 累积待派发跳
-- `request_plan(task)`：登记计划请求（observation 路由 planner）
-- **不调用工具且输出非空文本 = 终答**（direct_answer / FINISH 合一）
+---
 
-`observation` 三分支优先级：**计划请求 > 待派发（单项普通跳 / 多项批信封）> 终答**。
+## 5. LeaderAgent 编排流程
 
-### 4.2 并行派发（P1 批信封）
-- 同一回复多次调用 dispatch_agent → 批信封（recipient=`__batch__`，`dispatch_batch` 携带全部派发跳）
-- 批 >1 **强制 `direct_reply=False`**（执行完必须回传审查汇总）
-- 调度器 `_execute_batch`：`asyncio` 并行（`Semaphore(max_parallel)`），逐个看板闭环 + 写入会话历史，单失败隔离不炸批，停止信号传播
-- 批摘要以 `sender="batch"` 回灌 supervisor（run 阶段1 跳过重复消费）
+### 单跳直通链路
 
-### 4.3 防重复派发守卫
-`_exec_dispatch_agent` 两道判重（登记前）：
-1. **同 run 判重**：本回复已登记相同 `(agent, task)` → 拒绝（qwen-flash 曾登记确认后原样重复 tool_calls）
-2. **同 request 判重**：看板归一化 subject 判重（`find_same_task`，去除全部空白比较，**含已完成任务**——重跑相同任务只会产生重复/矛盾结果）
+```
+用户请求
+  │
+  ▼
+AutoPlanManager.execute_request()
+  包装 AgentMessage(sender="user", recipient="leader")
+  │
+  ▼
+LeaderAgent.run(msg, session_state)
+  │
+  ├─ think → LLM
+  │
+  ├─ 三种决策分支：
+  │    │
+  │    ├─ ① 直答（LLM 无 tool_calls，输出纯文本）
+  │    │    → 构造终答跳 AgentMessage(recipient="user", result=文本) 返回
+  │    │
+  │    ├─ ② 自己用工具（LLM 输出普通工具的 tool_calls）
+  │    │    → ToolExecutor 执行 → 结果进对话 → 继续 think 或终答
+  │    │
+  │    ├─ ③ 派发子智能体（LLM 输出 dispatch_agent 的 tool_calls）
+  │    │    → dispatch_agent 工具内联执行目标智能体的完整 run()
+  │    │    → 子智能体结果作为 tool result 回填对话
+  │    │    → leader 继续 think（看到结果后决策下一轮：再派发 / 汇总 / 终答）
+  │    │
+  │    └─ ④ 派 planner（LLM 输出 dispatch_agent(agent="planner") 的 tool_calls）
+  │         → planner 内联执行 → 产出任务分解 + 通过 task_* 工具登记看板
+  │         → leader 看到计划后，亲自执行或逐步派子智能体
+  │
+  └─ 返回终答跳 → AutoPlanManager 收尾
+       ├─ assistant 消息落 chat_message
+       ├─ 会话历史快照
+       ├─ hook: TURN_END
+       └─ SSE REQUEST_COMPLETED 事件
+```
 
-登记确认消息必须带累计数与停止指引：「全部任务登记完毕后直接输出简短说明文本结束本轮，不要再调用 dispatch_agent」。矛盾核实最多一次（新口径任务描述）。
+### 多子任务并行
 
-### 4.4 双模式编排
-- **自主编排（direct，默认）**：路由/审查 think → dispatch_agent 派发 → 收结果 → 再决策 → 终答
-- **planner-executor**：request_plan → planner 产出计划（PlanOutput JSON 放 `msg.result`）→ `consume_planner_plan` 落看板（step→TaskRecord，depends_on→blocked_by DAG）→ `dispatch_next_ready` 波次确定性派发（免 think）→ 无就绪任务才 think 审查
-  - 计划模式僵局逃生：dispatch_agent 优先 `pick_task_for_agent` 派看板待办（状态机天然防重）
-  - 跨 run 编排上下文：`SessionContext.orchestration`（mode/plan/step_task_map/turn_task_ids/last_task_id/execution_trace），turn 级重置
+同一回复中多次调用 `dispatch_agent` = 并行执行：
+- `dispatch_agent` 工具内部用 `asyncio.create_task` 并行启动子智能体
+- 通过 `asyncio.gather` 等所有子智能体完成后，将各结果汇总为一条 tool result 回填
+- leader 在下一次 think 时一次看到所有子任务结果
 
-### 4.5 模板合一与输入组装（P3）
-- **单一 profile**（无 route/review 双模板、无 `_is_review` 标志、无 `_prepare_agent` 二次覆盖）：约束合并为决策三选一 / 直接答复时机 / dispatch 场景 / direct_reply 判据 / request_plan 场景+僵局逃生 / 汇总职责 / task 自包含 / 矛盾核实一次 / 每任务只调用一次
-- 路由与审查的区分**完全由输入侧承载**：`_extract_task_text` 按 `msg.sender` 分支
-  - `user`/空 → 用户请求原文（路由）
-  - `batch` → 批审查框架（全部子任务结果摘要）
-  - 其它（执行智能体/planner）→ 单任务审查框架（最新回传以最高显著性呈现，result 空回落 task）
-- `_prepare_prompt_params` 统一注入 `agents_list_desc`（含 planner，request_plan 可用性由运行时校验）+ `board_desc`
-- `[:-1]` 历史切片的正确性依赖上述改写：route 末条=请求原文、单回传末条=最新回传、batch 末条=批内最后子任务回传（批摘要已含其内容）
+### 计划模式
 
-### 4.6 职责分层与直答
-- 取数类 agent 只产出其数据源内的原始统计结果；**跨数据源对比/汇总/换算由 supervisor 终答完成**，禁止塞进派发 task 或 planner 步骤
-- 派发 task 必须完全自包含（执行 agent 看不到对话历史与其它任务）
-- **direct_reply 直答模式**：恰好 1 个子任务且结果无需跨任务汇总 → `direct_reply=true` 下传；执行 agent `_resolve_final_target` 判定（`msg.direct_reply` 且本轮工具未全失败 → 直答 user，省审查轮）；工具全失败自动降级回传 supervisor
-- 直答已知代价（可接受）：审查兜底丢失（靠降级+多轮追问纠正）、看板任务停留 in_progress 至下一轮 reset（仅展示层）、execution_trace 不记录该轮
+1. **派 planner**：leader 调用 `dispatch_agent(agent="planner", task=用户原始请求)`
+2. **planner 内联执行**：LLM 先规划 → 通过 `task_create` 创建看板任务（每个任务含 subject / description / depends_on DAG）
+3. **leader 看到计划结果**（tool result 含看板文本 + 每个 task 详情）
+4. **逐步执行**：leader 按顺序派子智能体或自己执行，完成后 `task_update(task_id=N, status="completed")` 解锁下游
+5. **planner 无再派**：planner 只负责拆解和登记看板，不负责执行
 
-## 5. 任务看板
+### 防循环约束
 
-- 按 **request 维度**存储：`.data/{user}/{app}/session/{sid}/.tasks/{request_id}.json` 单文件（该请求全部 TaskRecord 列表）
-- `task_id` 按 request 从 1 计数，`(request_id, task_id)` 复合键天然唯一（跨请求不串号）
-- `get_board` 仅渲染当前 request 任务，历史请求不进 prompt
-- **task_id 精确闭环握手**：supervisor 三条派发路径（CALL_EXECUTOR 登记 / 计划模式 dispatch_board_task / NEXT_STEP）均下传 task_id；执行 agent `_reply` 回传原样保留（直答 user 清除）；`consume_child_result` 按 task_id 精确闭环，仅缺失 task_id 的异常消息才按 executor_agent+turn_ids 兜底
+- 已派发过的任务不重复派发：执行结果已在对话中（tool result），基于已有结果继续决策或汇总作答即可
+- 回传结果出现矛盾时：最多派发一次口径明确的核实任务，核实结果回填后必须直接汇总作答
+- 看板已有计划任务时禁止再派 planner
 
-## 6. 会话与停止机制
+---
 
-- `stop_request` 仅停止单个请求、保留会话；`stop_session` 停止会话所有任务并关闭会话——**分离实现**
-- 统一 `stop_signal` 检查点机制 + `TurnStoppedError` 异常处理复用
-- 停止/状态管理逻辑统一下沉 `session_pool.py`，chat_service 为薄委托层
-- 会话池 idle 回收带 `_is_quiescent` 活跃检查（仅回收无在途任务的空闲会话）
-- **会话复用不改写 `session.request`**：request 由 worker pop 时统一设置；入队时改写会致执行中请求的 request_id/publish_context/db_name 串号
+## 6. dispatch_agent 工具（agent-as-tool 核心）
 
-## 7. 执行智能体
+`dispatch_agent` 是一个普通工具，让 leader 能把执行权内联交给子智能体：
 
-- **data_explore**：元信息查询当前为硬编码测试桩（见遗留项 H1）；SQL 查询结果默认截断保留前 N 行 + 总行数 + 截断标记，避免大表撑爆上下文
-- **csv_explore**：`_resolve_csv_context` 统一路径解析（裸文件名/相对路径→用户项目 code_dir，绝对路径直接用，越界拒绝）
-- **run_python**：`__CSV_DIR__` 占位符；dev 本地 subprocess / 非 dev docker 分支，与 SQL 复用同一执行容器
-- SQL rows 序列化必须 `json.dumps(..., default=str)`（Decimal/datetime）
-- 会话历史默认不注入（任务自包含）
+**工具参数**：
+- `agent`：目标智能体名（如 "data_explore" / "csv_explore" / "planner"）
+- `task`：任务文本（必须自包含）
 
-## 8. 遗留项（P4 设计对照审查，2026-10-17）
+**执行流程**：
+1. `dispatch_agent` 工具收到调用
+2. 内部按 agent 名从 `AgentRegistry` 拿到 `AgentSpec` → `spec.cls()` 实例化（每调用新建实例，不缓存）
+3. 包装 `AgentMessage(sender="leader", recipient=目标, task=task)`
+4. `await 子智能体.run(msg, session_state)` 内联执行完整 ReAct 循环
+5. 子智能体返回终答跳（或执行失败的回传跳）
+6. 工具把子智能体结果作为 `ToolResult` 返回，leader 在下次 LLM 调用时看到
 
-### 已确认保留的现状
-- **H1**：data_explore 元信息查询为硬编码测试桩（prj_ec 三表，真实 information_schema 实现存于 `_query_available_db_info_bak`）——**用户确认有意保留**，后续将转向向量数据库按提示词检索相关表，恢复前不得当作缺陷修复
+### 子智能体结果处理
 
-### 中危待办
-1. `data_mysql.compute_correlation` 未导入——全量+2~10 数值列时必 NameError，被 except 吞为「相关性计算失败」；补 import
-2. `BaseReActAgent._reply` 恒 `success=True`——子任务失败信号丢失，consume_child_result 全按成功闭环；observation 应传入成败
-3. `supervisor_board` execution_trace 固定 `"success": True`——失败轨迹失真；改 `bool(msg.success)`
-4. 看板每操作全文件读+全量回写——N 任务一次闭环 O(N²) IO；建议进程内缓存+合并写
-5. `_execute_batch` 批内每子任务各计 1 轮——多波计划（15 任务）易提前触发 FORCE STOP(turn_max=20)；建议批计 1 轮或校准上限
+- **成功**：`ToolResult(success=True, data="执行结果文本")` — leader 看到后继续决策
+- **失败**：`ToolResult(success=False, message="执行失败：{reason}")` — leader 看到后可重试 / 换路 / 汇总时承认失败
 
-### 低危待办
-1. `agent/runtime.py` 死文件（无引用，与 auto_plan_manager 重复）——删除
-2. `tool_executor.parallel/sequence_execute` 空壳、`data_mysql._resolve_sample_pct` 导入未用——删除
-3. `max_tool_iterations/max_same_tool_calls` 配置读后未落地——删除或落地
-4. `data_mysql` SQL 行截断 50 与设计值 20 不一致——对齐口径
+---
 
-### 其它已知代价（可接受，暂不处理）
-- 直答模式：审查兜底丢失 / 看板停留 in_progress / execution_trace 缺记录（见 §4.6）
-- 每跳 `spec.cls()` 重建 agent 实例（supervisor 每跳重建 engine+coordinator）——量级小可接受，量大时缓存
+## 7. 任务看板（TaskBoardService）
+
+### 存储设计
+
+- 按 **request 维度**存储：`.data/{user_id}/{app_id}/session/{session_id}/.tasks/{request_id}.json`
+- 一个请求 = 一个 JSON 文件 = 全部任务
+- `task_id` 按 request 从 1 计数（文件内 `max(id)+1`），`(request_id, task_id)` 复合键天然唯一
+
+### TaskRecord 字段
+
+| 字段 | 说明 |
+|---|---|
+| `id` | task_id（request 内从 1 起） |
+| `subject` | 任务标题 |
+| `description` | 任务详细描述 |
+| `status` | pending / in_progress / completed / deleted |
+| `executor_agent` | 计划时由 planner 指定执行智能体（可为空，leader 自行决定） |
+| `blocked_by` | 依赖的前置任务 id 列表 |
+| `blocks` | 本任务解锁的下游任务 id 列表 |
+| `step_id` | 关联的执行步骤 id（可空） |
+
+### 看板工具（LLM 显式操作）
+
+| 工具 | 参数 | 功能 |
+|---|---|---|
+| `task_create` | subject, description, depends_on? | 创建任务（自动维护 blocked_by / blocks DAG） |
+| `task_update` | task_id, status | 更新状态（completed 时自动从下游 blocked_by 移除并解锁） |
+| `task_get` | task_id | 获取单任务详情 |
+| `task_list` | — | 获取当前 request 看板全部任务（含 ready 标记和 blocked_by 信息） |
+
+### 看板在 prompt 中的注入
+
+- leader 的 `prompt_manager` 有 `taskbord_prompt="{{board_desc}}"` 模板位
+- `_prepare_prompt_params` 自动调用 `TaskBoardService.get_board()` 获取文本板渲染注入
+
+---
+
+## 8. SessionContext（会话历史真相源）
+
+`SessionContext.chat_messages` 是整个 AI Service 的**会话历史唯一真相源**：
+
+- **写入点**：AutoPlanManager（用户消息 / assistant 终答）、dispatch_agent 内联执行（子智能体结果）、BaseReActAgent（LLM tool_calls + tool result）
+- **读取点**：leader 每轮 think 时从 SessionContext 取历史
+- **快照持久化**：turn 结束后 `save_turn_chat_message_snapshot` 写磁盘（Swap-out 后恢复的依据）
+
+---
+
+## 9. 看板文本格式（get_board 渲染）
+
+```
+## Task Board
+
+- [ ] 1: 拉取销售总表数据  (blocked by: none)
+- [>] 2: 计算月度销售趋势  (blocked by: 1)   ← in_progress
+- [ ] 3: 对比各区域增速   (blocked by: 1)
+- [x] 4: 生成可视化图表   (blocked by: 2,3) ← completed
+```
+
+状态标记：`[ ]` pending / `[>]` in_progress / `[x]` completed / `[-]` deleted。ready 标记 = 所有 blocked_by 任务均已 completed。
+
+---
+
+## 10. 停止机制
+
+### 统一 stop_signal + TurnStoppedError
+
+- `RuntimeSessionState.stop_signal`（`asyncio.Event`）是 session 级停止信号
+- `raise_if_stop_signal(session_state)` 是执行流中的**检查点**，检测到信号立即抛 `TurnStoppedError`
+- 检查点位置：
+  - AutoPlanManager.execute_request 入口
+  - BaseReActAgent ReAct 循环的每轮 think 前
+  - dispatch_agent 内联执行前（子智能体 run 内也会在检查点抛出）
+
+### stop_request vs stop_session
+
+| 操作 | 作用域 | 行为 |
+|---|---|---|
+| `stop_request` | 单个请求 | 设置 stop_signal → grace 等待活跃任务自行走到检查点停止 → **保留会话** |
+| `stop_session` | 整个会话 | 设置 stop_signal → grace 等待 → 关闭 worker + 所有活跃任务 → 从池中移除 |
+
+详见 [SessionState管理.md](./SessionState管理.md)。
+
+---
+
+## 11. 关键变更记录
+
+| 版本 | 变化 | 原因 |
+|---|---|---|
+| v1.0（已退役） | 多跳接力路由（Supervisor → Dispatch → 执行 Agent → 回传 → 审查 → 终答） | 原型验证 |
+| v2.0（当前） | 单跳直通 + agent-as-tool：用户→leader→用户，子智能体内联为 tool result | 多跳路由引入太多复杂性（批信封 / 并行路由 / 审查框架 / orchestration_state），agent-as-tool 更简洁、更符合主流设计（Anthropic Task / OpenAI Agents SDK as_tool） |

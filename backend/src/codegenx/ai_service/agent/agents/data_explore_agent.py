@@ -50,13 +50,13 @@ class DateExploreAgent(BaseReActAgent):
         super().__init__(context=context)
 
     async def _prepare_prompt_params(self,request: UserAIRequest) -> dict:
-        """把语义层召回的候选表卡注入 prompt（agent 仅基于公共数据源作答）。
+        """把语义层召回的候选表卡注入 prompt（只聚焦用户当前选择的数据集）。
 
-        available_schemas 元素格式为 "datasource.schema"（如 business.dvdrental）；
-        datasource 取其 datasource 部分，方言固定取 settings.public_db_dialect。
+        current_db 格式为 "datasource.schema"（如 business.dvdrental）；
+        方言固定取 settings.public_db_dialect。
         """
-        available = list(getattr(request, "available_schemas", None) or [])
-        public_ds = available[0].split(".")[0] if available else None
+        current = str(getattr(request, "current_db", None) or "")
+        public_ds = current.split(".")[0] if current else None
         return {
             "type": settings.public_db_dialect,
             "database_info": await hybrid.build_context(

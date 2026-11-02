@@ -38,14 +38,17 @@ class SemanticTool(BaseTool):
 
 
 def _datasource(params: dict, session_state: Any) -> str | None:
-    """数据源优先级：显式参数 > 会话可用公共库 > 全局唯一数据源（store 内部兜底）。
+    """数据源优先级：显式参数 > 会话当前数据集 > 可用白名单首个 > store 内部兜底。
 
-    agent 仅基于公共数据源作答；available_schemas 元素格式为 "datasource.schema"
+    current_db / available_schemas 元素格式均为 "datasource.schema"
     （如 business.dvdrental），取其 datasource 部分作为语义层数据源名。
     """
     explicit = (params.get("datasource") or "").strip()
     if explicit:
         return explicit.split(".")[0]
+    current = getattr(session_state, "current_db", None)
+    if current:
+        return current.split(".")[0]
     available = list(getattr(session_state, "available_schemas", None) or [])
     if available:
         return available[0].split(".")[0]

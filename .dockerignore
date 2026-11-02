@@ -1,0 +1,42 @@
+# 根目录 docker build / compose build 的忽略规则
+
+# 环境变量（敏感，各子目录有自己的 .env.example）
+.env
+backend/.env
+frontend/.env
+frontend/.env.local
+
+# 虚拟环境 / 依赖目录
+**/.venv/
+**/node_modules/
+backend/__pycache__/
+frontend/dist/
+
+# IDE / 编辑器
+.vscode/
+.idea/
+*.swp
+*.suo
+
+# 日志 / 运行时数据
+logs/
+**/*.log
+backend/.data/
+backend/tests/
+**/__pycache__/
+
+# 临时 / Git
+.git/
+.gitignore
+.env
+.env.*
+
+# 文档
+docs/
+*.md
+
+# 子目录的 Docker 构建产物（compose 会独立 build）
+backend/Dockerfile
+backend/.dockerignore
+frontend/Dockerfile
+frontend/.dockerignore

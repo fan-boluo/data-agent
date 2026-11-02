@@ -49,8 +49,11 @@ async def chat_to_gen_code_post(
 
     # dbName 后端以项目记录为准，覆盖前端传值（前端传值仅参考，防伪造查任意库）
     payload["dbName"] = app.db_name
-    # 可用公共数据源：agent 仅基于这些公共库做问答（用户自己的库不在问答范围）
+    # 可用公共数据源：权限白名单（agent 只聚焦 currentDb，用户自己的库不在问答范围）
     payload["availableSchemas"] = list(PUBLIC_SCHEMAS)
+    # 当前数据集必须落在白名单内，越界或非法值一律置空（由 agent 反问用户选择）
+    if payload.get("currentDb") and payload["currentDb"] not in PUBLIC_SCHEMAS:
+        payload["currentDb"] = None
 
     request = UserAIRequest.model_validate(payload)
     return await generate_code_stream(request)

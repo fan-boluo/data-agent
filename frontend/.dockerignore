@@ -1,0 +1,25 @@
+# Node
+node_modules/
+dist/
+.vite/
+
+# 环境（生产环境构建仍要读 .env，但 build 时通常用 .env.production）
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+
+# 工具链
+.DS_Store
+Thumbs.db
+
+# 后端（Dockerfile 在 frontend/ 下，backend 目录不进构建上下文）
+# （compose 在仓库根目录统一构建，这里保持纯前端上下文）
+
+# Docker
+Dockerfile
+.dockerignore
+.docker/

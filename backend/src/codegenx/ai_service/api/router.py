@@ -32,7 +32,7 @@ from codegenx.ai_service.schema.ai_schema import (
     AiServiceStopRequest,
     AiServiceStopResponse,
 )
-from shared.constants import PUBLIC_SCHEMAS
+from shared.constants import PUBLIC_DATASETS, PUBLIC_SCHEMAS
 from codegenx.ai_service.trace.schema.admin import (
     MonitorAlertQueryRequest,
     MonitorSessionQueryRequest,
@@ -53,6 +53,14 @@ class SessionListItem(BaseModel):
     create_time: str
 
 
+@chat_router.get("/datasets")
+async def list_public_datasets(
+    login_user: JWTUser = Depends(require_login),
+):
+    """可选数据集列表（前端输入框选择器用；后续权限管控后按用户圈定）。"""
+    return success(data=list(PUBLIC_DATASETS))
+
+
 @chat_router.post("/chat/gen")
 async def generate_code_stream(
     request: UserAIRequest,
@@ -62,6 +70,10 @@ async def generate_code_stream(
     request.user_id = str(login_user.user_id)
     # 可用公共数据源以后端为准（覆盖前端传值，防伪造圈定任意库；后续权限管控后按用户圈定）
     request.available_schemas = list(PUBLIC_SCHEMAS)
+    # 当前数据集必须落在白名单内，越界或非法值一律置空（由 agent 反问用户选择）
+    if request.current_db and request.current_db not in PUBLIC_SCHEMAS:
+        log.warning("忽略非法 currentDb: {}", request.current_db)
+        request.current_db = None
     trace_id, request_id, session_id = _validate_call_context(request)
     ctx = HookContext(event=HookEvent.ON_USER_INPUT,data={"user_input":request.message})
     res = await hook_manager.emit(HookEvent.ON_USER_INPUT,ctx)

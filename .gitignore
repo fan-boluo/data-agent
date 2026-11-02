@@ -10,6 +10,5 @@ config.json
 /.data/
 /.claude/
 /.vite/
-/backend/.claude/
 /logs/
 /.trae/

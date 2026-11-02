@@ -264,13 +264,13 @@ class ToolExecutor(BaseComponent):
             tool_input.setdefault("request_id", turn_id)
 
         if tool_name in DATA_ANALYSIS_TOOL_NAMES:
-            # agent 仅基于公共数据源作答：db_name 注入公共库的 database 部分
-            # available_schemas 元素格式为 "datasource.schema"（如 business.dvdrental）
-            available_schemas = getattr(session_state, "available_schemas", []) if session_state is not None else []
-            available_schemas = list(available_schemas or [])
-            if available_schemas:
-                tool_input.setdefault("db_name", available_schemas[0].split(".")[0])
-                tool_input.setdefault("available_schemas", available_schemas)
+            # agent 只聚焦用户当前选择的数据集：db_name/schema 全部来自 current_db
+            # current_db 格式为 "datasource.schema"（如 business.dvdrental / tpcds_sf1.public）
+            current_db = getattr(session_state, "current_db", None) if session_state is not None else None
+            if current_db and "." in current_db:
+                db_name, db_schema = current_db.split(".", 1)
+                tool_input.setdefault("db_name", db_name)
+                tool_input.setdefault("db_schema", db_schema)
             tool_input.setdefault("app_id", app_id)
 
         # BEFORE_TOOL_CALL 钩子（参数注入后触发，让守卫看到完整参数；不修改调用方原 tool_call）

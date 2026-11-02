@@ -1,9 +1,9 @@
 ﻿"""
 PostgreSQL 只读 SQL 执行工具（data_explore 智能体的核心工具）。
 
-db_name 由 ToolExecutor 从 session_state 注入（公共库的 database 名，如 business），
-schema 从注入的 available_schemas（格式 datasource.schema，如 business.dvdrental）解析。
-SQL 经 _check_sql_safety 只读守卫后执行，结果格式化为文本表格（最多展示 50 行）。
+db_name / db_schema 由 ToolExecutor 从 session_state.current_db 注入
+（current_db 格式 "datasource.schema"，如 business.dvdrental）。
+SQL 经只读守卫后执行，结果格式化为文本表格（最多展示 50 行）。
 """
 
 from __future__ import annotations
@@ -64,18 +64,14 @@ class ExecutePostgresqlTool(BaseTool):
             return ToolResult(success=False, message="SQL 为空，无法执行")
         db_name = str(params.get("db_name") or "").strip()
         if not db_name:
-            return ToolResult(success=False, message="当前应用未绑定数据库（db_name 未注入），无法执行 SQL")
+            return ToolResult(
+                success=False,
+                message="未选择数据集，无法执行 SQL；请先让用户选择要分析的数据集",
+            )
+        schema = str(params.get("db_schema") or "").strip()
 
-        # ── 统一只读守卫（复用 MysqlManager 安全检查） ──
+        # ── 统一只读守卫（复用 dbutils 安全检查） ──
         check_sql_safety(sql)
-
-        # schema 从 available_schemas（datasource.schema）中匹配当前库
-        available = list(params.get("available_schemas") or [])
-        schema = next(
-            (s.split(".", 1)[1] for s in available
-             if "." in s and s.split(".", 1)[0] == db_name),
-            "",
-        )
 
         from codegenx.ai_service.agent.db import postgres_manager
         rows = await postgres_manager.query(db_name, sql, schema=schema)

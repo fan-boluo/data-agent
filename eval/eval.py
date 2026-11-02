@@ -249,6 +249,12 @@ async def cmd_replay(args) -> None:
                 }
                 if case["db_name"]:
                     payload["dbName"] = case["db_name"]
+                    # 多数据集改造后 agent 只聚焦 currentDb（datasource.schema）；
+                    # 由 db_name 从 PUBLIC_SCHEMAS 反查对应条目
+                    current_db = next(
+                        (s for s in PUBLIC_SCHEMAS if s.split(".", 1)[0] == case["db_name"]), None)
+                    if current_db:
+                        payload["currentDb"] = current_db
                 t0 = time.time()
                 try:
                     # SSE：读到流结束即 turn 结束（内容不需解析）
