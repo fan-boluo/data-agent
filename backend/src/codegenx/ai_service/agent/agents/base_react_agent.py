@@ -189,7 +189,7 @@ class BaseReActAgent(Agent):
                 self.agent_config, self.tools, messages, session_state,
                 agent_context=self._context,
             )
-        log.debug("{},llm_response:{}", self.agent_name, self._trim_response_for_log(llm_response))
+        # log.debug("{},llm_response:{}", self.agent_name, self._trim_response_for_log(llm_response))
         return llm_response
 
     @staticmethod
@@ -376,8 +376,8 @@ class BaseReActAgent(Agent):
             messages = await self._context.assemble(payload.payload_messages)
             step += 1
             log.info("【{} Think】:  step {}/{} START", self.agent_name, step, self.max_steps)
-            log.debug("{} 传入llm的chat_message,system_prompt除外：\n{}",self.agent_name,
-                    "\n".join([str(msg) for msg in messages if msg.get("role") != "system"]))
+            # log.debug("{} 传入llm的chat_message,system_prompt除外：\n{}",self.agent_name,
+            #         "\n".join([str(msg) for msg in messages if msg.get("role") != "system"]))
             # LLM 调用前后 hook 分发（纯决策通道：输入输出护轨/限流挂载点；
             # 观测已直埋韧性层——llm span/token/指标不经 hook）
             before_ctx = HookContext(

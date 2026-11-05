@@ -1,5 +1,6 @@
 import asyncio
 import importlib
+import inspect
 import json
 import sys
 from abc import ABC
@@ -49,12 +50,12 @@ class ToolRegistry(BaseComponent):
                 # log.debug(f"导入模块成功: {module_name}")
                 # 遍历模块里所有成员
                 for name, obj in vars(module).items():
-                    # 筛选：是类 + 继承自 base_class + 不是自己
+                    # 筛选：是类 + 继承自 BaseTool + 不是自身 + 不是抽象基类
                     if (
                             isinstance(obj, type)  # 是类
                             and issubclass(obj, BaseTool)  # 继承 BaseTool
-                            and obj != BaseTool  # 排除基类自身
-                            and not isinstance(obj, ABC)  # 不是抽象类
+                            and obj is not BaseTool  # 排除基类自身
+                            and not inspect.isabstract(obj)  # 排除抽象基类（SemanticTool 等）
                     ):
                         classes.append(obj)
                         # log.debug(f"✅ 找到工具类: {module_name}.{name}")

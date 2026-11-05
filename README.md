@@ -102,60 +102,131 @@ backend/src/codegenx/
 - IP 黑名单管理
 
 ## Agent 技术架构总览
-基于事件触发的AgentRuntime
+
+agent-as-tool 多智能体协作架构 + 分层韧性 + 事件驱动观测
+
 ```
-                        ┌─────────────────┐
-                        │   MessageBus    │  ← 事件总线
-                        └────────┬────────┘
-                                 │
-              ┌──────────────────▼──────────────────┐
-              │           AutoPlanManager           │
-              │  ┌─────────────────────────────────┐ │
-              │  │         Dispatch Loop           │ │
-              │  └───────────┬─────────────────────┘ │
-              │              │                       │
-              │  ┌───────────▼──────────┐            │
-              │  │     SessionPool      │ ← 会话池    │
-              │  │  (max 1000, TTL 1h)  │            │
-              │  └───────────┬──────────┘            │
-              │              │                       │
-              │  ┌───────────▼──────────┐            │
-              │  │   Turn Loop (≤50)    │ ← 多轮对话  │
-              │  │  ┌────────────────┐  │            │
-              │  │  │ Context Builder│  │ ← 上下文    │
-              │  │  │ + Compaction   │  │    装+压缩  │
-              │  │  └───────┬────────┘  │            │
-              │  │          ▼           │            │
-              │  │  ┌────────────────┐  │            │
-              │  │  │   LLM Client   │  │ ← 模型      │
-              │  │  │  + Recovery    │  │   容错重试  │
-              │  │  └───────┬────────┘  │            │
-              │  │          ▼           │            │
-              │  │  ┌────────────────┐  │            │
-              │  │  │ Tool Executor  │  │ ← 工具调用  │
-              │  │  │ (14+ tools)    │  │             │
-              │  │  └───────┬────────┘  │             │
-              │  │          ▼           │             │
-              │  │  (loop if tools)     │             │
-              │  └──────────────────────┘             │
-              └───────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                     Vue 3 前端                              │
+│         Ant Design Vue · Monaco Editor · ECharts             │
+└──────────────────────────┬───────────────────────────────────┘
+                           │ HTTP / SSE
+┌──────────────────────────▼───────────────────────────────────┐
+│                FastAPI Gateway                                │
+│     JWT 鉴权 · 固定窗口限流(5/s) · IP 黑名单 · SSE 事件总线     │
+└──────────────────────────┬───────────────────────────────────┘
+                           │
+┌──────────────────────────▼───────────────────────────────────┐
+│               AutoPlanManager（中央调度器）                   │
+│  ┌─────────────────────────────────────────────────────────┐  │
+│  │                SessionPool（内存会话池）                  │  │
+│  │                  max 1000 · TTL 1h · LRU 回收           │  │
+│  └─────────────────────────────────────────────────────────┘  │
+│                           │                                   │
+│  ┌────────────────────────▼───────────────────────────────┐  │
+│  │               Leader Agent（ReAct 主循环）               │  │
+│  │                 max_steps=50 · 单会话串行               │  │
+│  │                                                         │  │
+│  │  ┌───────────────────────────────────────────────────┐  │  │
+│  │  │           agent-as-tool 子智能体（同步内联）        │  │  │
+│  │  │  ┌───────────┐ ┌────────────┐ ┌───────────────┐  │  │  │
+│  │  │  │  planner  │ │data_explore│ │ csv_explore   │  │  │  │
+│  │  │  │(任务拆解  │ │(SQL/语义    │ │(文件探查     │  │  │  │
+│  │  │  │  DAG看板) │ │  双数据源)  │ │  CSV/Python) │  │  │  │
+│  │  │  └─────┬─────┘ └────┬───────┘ └──────┬────────┘  │  │  │
+│  │  └────────┼────────────┼────────────────┼───────────┘  │  │
+│  └───────────┼────────────┼────────────────┼───────────────┘  │
+│              ▼            ▼                ▼                  │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │                  Tool Layer（26 个工具）               │  │
+│  │                                                         │  │
+│  │  ┌── 语义检索 ──┐  ┌── SQL 执行 ──┐  ┌── 看板管理 ──┐ │  │
+│  │  │ search_tables │  │execute_pg    │  │ task_create  │ │  │
+│  │  │ describe_card │  │(只读+超时熔断)│  │ task_update  │ │  │
+│  │  │ find_join_path│  │              │  │ (claim/complet│ │  │
+│  │  │ search_metrics│  │              │  │  e 解锁下游) │ │  │
+│  │  └───────────────┘  └──────────────┘  └──────────────┘ │  │
+│  │                                                         │  │
+│  │  ┌── Python 沙箱 ──┐  ┌── 文件操作 ──┐  ┌── Agent 派发──┐│  │
+│  │  │ run_python      │  │ read/write   │  │dispatch_agent││  │
+│  │  │ code_check      │  │ edit/find/grep│ │ (同步内联)    ││  │
+│  │  └─────────────────┘  └──────────────┘  └──────────────┘│  │
+│  └───────────────────────────────────────────────────────┘  │
+│                                                               │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │           Context Layer（会话上下文 + 子隔离）         │  │
+│  │  session_context（主对话）· sub_context（子智能体隔离）  │  │
+│  │  session_summary 自动提取（水位>10 条触发 LLM 摘要）    │  │
+│  └───────────────────────────────────────────────────────┘  │
+│                                                               │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │              Resilience Layer（韧性层）                 │  │
+│  │  三态熔断器（闭合/打开/半开探测）                       │  │
+│  │  按 (provider:model) 粒度独立熔断                       │  │
+│  │  RETRYABLE / CONTEXT_OVERFLOW / FATAL / LOGIC 四分类    │  │
+│  │  多模型 fallback 链（qwen3.8-max → deepseek → 自定义）  │  │
+│  └───────────────────────────────────────────────────────┘  │
+│                                                               │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │             Hook 事件系统（生命周期埋点）               │  │
+│  │  before_tool_call · after_tool_call                     │  │
+│  │  memory_turn_signal · tool_semantics_recorder           │  │
+│  │  sql_trace_start/end 自动采集 SQL trace                 │  │
+│  └───────────────────────────────────────────────────────┘  │
+└──────────────────────────┬───────────────────────────────────┘
+                           │
+          ┌────────────────┼────────────────┐
+          ▼                ▼                ▼
+┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
+│  Hot Memory     │ │  Warm Memory    │ │  Semantic Layer  │
+│  (MySQL 真源)   │ │  (Qdrant 向量)  │ │  (PostgreSQL +   │
+│  衰减/归档/     │ │  关键词/主题     │ │   pgvector)      │
+│  定时一致性校验 │ │  召回 + 合成     │ │  表卡/列/键/指标 │
+│                 │ │                 │ │  向量化语义检索  │
+└─────────────────┘ └─────────────────┘ └─────────────────┘
+          │
+          ▼
+┌───────────────────────────────────────────────────────────────┐
+│              Observation Layer（全链路观测）                   │
+│  Trace Span 采集（request → agent → tool → sql → llm）        │
+│  Prometheus 指标（LLM 调用/失败率/熔断状态/Token 消耗）        │
+│  Telemetry 存储（PostgreSQL）                                 │
+│  评测流水线（REPLAY → SCORE → REPORT）                        │
+└───────────────────────────────────────────────────────────────┘
 ```
+
+### 自研组件 vs 外部依赖
+
+| 层级 | 自研 | 外部 |
+|------|------|------|
+| Agent Runtime | AutoPlanManager · ReAct Turn Loop · Context Builder · SubContext 隔离 | FastAPI · asyncpg |
+| Agent 编排 | agent-as-tool 同步内联 · Planner DAG 看板 · TaskBoard claim/complete 闭环 | — |
+| 工具系统 | 26 个工具 + Hook 参数守卫 + 工具白名单按 agent 粒度 | — |
+| 韧性层 | 三态熔断器（状态机+asyncio.Lock 串行化）· 四分类错误处理 · 多模型 fallback 链 | OpenAI 兼容协议 |
+| 观测 | Hook 事件系统 · Trace Span 采集 · SQL trace 自动标记 | Prometheus · Grafana |
+| 记忆 | Hot/Warm 分层 · 衰减/归档/定时校验 · Token 预算管控 · 会话摘要自动提取 | MySQL · Qdrant |
+| 语义层 | 表卡/列/键/指标提取 + 向量化 · Hybrid 检索（向量+关键词）· pgvector | PostgreSQL · pgvector |
+| 评测 | REPLAY/SCORE/REPORT 流水线 · Valid/EX/VES 指标 · 失败归因分类 | — |
 
 ### 核心组件
 
-| 组件 | 说明                                                                 |
-|---|--------------------------------------------------------------------|
-| **AutoPlanManager** | 中央调度器，管理消息总线、会话池、工具注册、钩子系统                                         |
-| **SessionPool** | 内存会话池，最多 1000 个并发会话，空闲自动回收                                     |
-| **Turn Loop** | 多轮对话循环，限制每轮最大迭代次数，每次迭代组装上下文 → LLM 推理 → 工具调用                        |
-| **Context Builder** | 动态组装系统提示词 + 历史消息 + 工具结果，超长自动压缩                                     |
-| **LLM Client** | 基于 OpenAI 兼容协议，支持 DashScope / DeepSeek / Zhipu / vLLM / 自定义        |
-| **Tool System** | 20+ 工具：代码检查、CSV/PostgreSQL 数据操作、文件读写、搜索（find/grep）、任务面板、子 Agent、Skill 加载 |
-| **Hook System** | 生命周期钩子：LLM 前后、工具前后、错误处理                                  |
-| **Memory** | 三级记忆：Hot（全局 MEMORY.md）、Warm（关键词召回主题文件）、Session（当前会话）               |
-| **Skill ** | 技能：数据清洗、特征工程、建模、绘图、Python 分析、SQL 分析、报告生成  (待测试优化 TODO)                   |
-| **Task Board** | 会话内持久化任务面板，Agent 可自行规划/追踪子任务                                       |
-| **Trace System** | 全链路追踪：会话录制 → Span 采集 → 指标计算 → 告警评估 → Prometheus 暴露                 |
+| 组件 | 说明 |
+|---|---|
+| **AutoPlanManager** | 中央调度器，管理消息总线、会话池、工具注册、Hook 事件分发、Trace 采集 |
+| **SessionPool** | 内存会话池，max 1000 并发，LRU 淘汰，空闲自动卸载 chat_messages（保留元数据） |
+| **Turn Loop** | ReAct 多轮循环 ≤50 步，每轮：组装上下文 → LLM 推理 → 工具调用 → Hook 埋点 → 下一轮或退出 |
+| **Leader Agent** | 主智能体，决策直接答复 / 自己执行 / 派发 planner / 派发子智能体；agent-as-tool 模式内联调度 |
+| **Planner Agent** | 任务拆解为 DAG（depends_on 依赖链），自动登记 TaskBoard；执行完 task_update 解锁下游 |
+| **SubContext** | 子智能体独立上下文隔离，避免 leader 对话历史污染；执行完同步写回真相源 |
+| **Context Builder** | 动态组装 system prompt + session_summary + history messages + sub_context + tool results；超长自动压缩 |
+| **LLM Resilience** | CircuitBreaker 三态状态机按 (provider:model) 粒度独立熔断；RETRYABLE/OVRFLOW/FATAL/LOGIC 四分类 |
+| **Tool System** | 26 工具：语义检索 / SQL沙箱 / Python沙箱 / 文件操作 / 看板管理 / Agent派发 / Skill加载 |
+| **Hook System** | 生命周期 Hook：before_tool_call / after_tool_call / on_turn_end / on_session_end；SQL trace 自动采集 |
+| **Memory System** | Hot(MySQL 真源) · Warm(Qdrant 向量召回) · Session(当前会话)；衰减/归档/定时校验/Token 管控 |
+| **Semantic Layer** | PostgreSQL 表卡(列/类型/注释/主键) + 业务指标向量化；search_tables / describe_table_card / find_join_path |
+| **Trace System** | 全链路 Span 采集（request→agent→tool→sql→llm）；Prometheus 指标暴露（LLM 调用/熔断状态/Token 消耗） |
+| **Eval Pipeline** | REPLAY/SCORE/REPORT 三步流水线；Valid/EX/VES 指标；失败归因（result_mismatch/SQL_error/timeout/context_overflow） |
+| **Task Board** | 会话内 DAG 看板；planner 登记 → leader claim in_progress → 执行完 task_update completed → 解锁下游 depends_on |
 
 
 ### 环境要求

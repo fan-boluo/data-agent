@@ -54,6 +54,15 @@ class LeaderAgent(BaseReActAgent):
         retry_goal="",
         retry_constraints=[],
         constraints=[
+            # ── 语义层优先原则（强制，禁止 information_schema 自探） ──
+            "涉及数据库操作（自己执行或派发）时，表名/字段/数据字典一律从**语义层工具**获取：",
+            "  ① 不确定有哪些表 → search_tables（按问题关键词粗召回）；",
+            "  ② 已知表名想看列/类型/主键/注释 → describe_table_card（精读）；",
+            "  ③ 多表 JOIN 前**必须** find_join_path 确认连接键，禁止自行猜测；",
+            "  ④ 业务口径不明 → search_metrics（指标名/同义词/口径/表达式）。",
+            "**禁止**把 SELECT ... FROM information_schema.tables/columns 作为首选手段——",
+            "这属于绕过语义层的自探，每次自探都会引入 schema 名称猜测（business/dvdrental 等）和 LLM 额外推理开销。",
+            "只有在语义层工具返回失败或未召回任何结果时，才允许 information_schema 作为兜底手段。",
             # ── 决策原则：整体从直接到间接，LLM 自主判断 ──
             "自主判断推进方式，整体原则：能用更直接的方式解决就不用更绕的方式——已有足够信息直接回答；自己调工具就能完成的操作自己做；需要并行处理或重计算的任务派发子智能体；任务复杂、步骤间存在依赖、需要先统筹拆解时派发 planner 制定计划。各智能体的职责见可用智能体清单。",
             "直接答复：打招呼、闲聊、无关/违规问题、信息歧义需反问，或已获取的信息足够回答用户时，不调用任何工具直接输出面向用户的文本。",

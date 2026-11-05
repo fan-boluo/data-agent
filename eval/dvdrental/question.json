@@ -1,48 +1,666 @@
 [
-  {"id":"dvdrental_01","question":"列出所有演员的名字，按姓氏升序排序","sql":"SELECT first_name, last_name FROM actor ORDER BY last_name ASC;","difficulty":"easy","ops":["single_table","order_by"],"grain":"detail","domain":"actor","multi_hop":0},
-  {"id":"dvdrental_02","question":"找出姓氏以 'W' 开头的演员","sql":"SELECT * FROM actor WHERE last_name LIKE 'W%';","difficulty":"easy","ops":["single_table"],"grain":"detail","domain":"actor","multi_hop":0},
-  {"id":"dvdrental_03","question":"统计一共有多少部电影","sql":"SELECT COUNT(*) AS film_count FROM film;","difficulty":"easy","ops":["single_table"],"grain":"single_value","domain":"film","multi_hop":0},
-  {"id":"dvdrental_04","question":"找出评级为 PG 的所有电影，返回标题和租赁价格","sql":"SELECT title, rental_rate FROM film WHERE rating = 'PG';","difficulty":"easy","ops":["single_table"],"grain":"detail","domain":"film","multi_hop":0},
-  {"id":"dvdrental_05","question":"找出替换成本在 10 到 20 之间的电影","sql":"SELECT title, replacement_cost FROM film WHERE replacement_cost BETWEEN 10 AND 20;","difficulty":"easy","ops":["single_table"],"grain":"detail","domain":"film","multi_hop":0},
-  {"id":"dvdrental_06","question":"找出标题里面包含 'Action' 的电影","sql":"SELECT title FROM film WHERE title ILIKE '%action%';","difficulty":"easy","ops":["single_table"],"grain":"detail","domain":"film","multi_hop":0},
-  {"id":"dvdrental_07","question":"查询所有不同的电影评级有哪些","sql":"SELECT DISTINCT rating FROM film;","difficulty":"easy","ops":["single_table","distinct"],"grain":"distinct_count","domain":"film","multi_hop":0},
-  {"id":"dvdrental_08","question":"统计客户一共有多少个不同的地区district","sql":"SELECT COUNT(DISTINCT district) FROM address;","difficulty":"easy","ops":["single_table","distinct"],"grain":"distinct_count","domain":"address","multi_hop":0},
-  {"id":"dvdrental_09","question":"列出所有分类名称","sql":"SELECT name FROM category;","difficulty":"easy","ops":["single_table"],"grain":"detail","domain":"category","multi_hop":0},
-  {"id":"dvdrental_10","question":"查询2005年5月1日到2005年6月1日之间的租赁记录","sql":"SELECT * FROM rental WHERE rental_date BETWEEN '2005-05-01' AND '2005-06-01';","difficulty":"easy","ops":["single_table","date_filter"],"grain":"detail","domain":"rental","multi_hop":0},
-  {"id":"dvdrental_11","question":"统计每一种评级的电影数量","sql":"SELECT rating, COUNT(*) AS cnt FROM film GROUP BY rating;","difficulty":"medium","ops":["single_table","group_by"],"grain":"aggregate","domain":"film","multi_hop":0},
-  {"id":"dvdrental_12","question":"找出时长大于120分钟的电影，按时长从大到小排序","sql":"SELECT title, length FROM film WHERE length > 120 ORDER BY length DESC;","difficulty":"medium","ops":["single_table","order_by"],"grain":"detail","domain":"film","multi_hop":0},
-  {"id":"dvdrental_13","question":"统计每个演员出演的电影数量，取前10名参演最多的演员","sql":"SELECT a.first_name, a.last_name, COUNT(fa.film_id) AS movie_count FROM actor a LEFT JOIN film_actor fa ON a.actor_id = fa.actor_id GROUP BY a.actor_id, a.first_name, a.last_name ORDER BY movie_count DESC LIMIT 10;","difficulty":"medium","ops":["multi_join","group_by","order_by","limit"],"grain":"top_n","domain":"actor","multi_hop":1},
-  {"id":"dvdrental_14","question":"查询电影《ACADEMY DINOSAUR》对应的所有演员","sql":"SELECT a.first_name, a.last_name FROM actor a JOIN film_actor fa ON a.actor_id = fa.actor_id JOIN film f ON fa.film_id = f.film_id WHERE f.title = 'ACADEMY DINOSAUR';","difficulty":"medium","ops":["multi_join"],"grain":"detail","domain":"actor","multi_hop":2},
-  {"id":"dvdrental_15","question":"统计每个分类下电影的数量，只保留电影数量大于60的分类","sql":"SELECT c.name, COUNT(fc.film_id) AS film_cnt FROM category c JOIN film_category fc ON c.category_id = fc.category_id GROUP BY c.category_id, c.name HAVING COUNT(fc.film_id) > 60;","difficulty":"medium","ops":["multi_join","group_by","having"],"grain":"aggregate","domain":"category","multi_hop":1},
-  {"id":"dvdrental_16","question":"查询客户以及他们对应的城市名称","sql":"SELECT c.first_name, c.last_name, ci.city FROM customer c JOIN address a ON c.address_id = a.address_id JOIN city ci ON a.city_id = ci.city_id;","difficulty":"medium","ops":["multi_join"],"grain":"detail","domain":"customer","multi_hop":2},
-  {"id":"dvdrental_17","question":"统计每个员工处理了多少笔支付订单","sql":"SELECT s.first_name, s.last_name, COUNT(p.payment_id) AS pay_cnt FROM staff s JOIN payment p ON s.staff_id = p.staff_id GROUP BY s.staff_id, s.first_name, s.last_name;","difficulty":"medium","ops":["multi_join","group_by"],"grain":"aggregate","domain":"staff","multi_hop":1},
-  {"id":"dvdrental_18","question":"找出总消费超过100元的客户，输出客户id和总金额","sql":"SELECT customer_id, SUM(amount) AS total_pay FROM payment GROUP BY customer_id HAVING SUM(amount) > 100;","difficulty":"medium","ops":["group_by","having"],"grain":"aggregate","domain":"payment","multi_hop":0},
-  {"id":"dvdrental_19","question":"找出还没有归还的租赁记录，显示客户姓名、电影名称、租赁时间","sql":"SELECT c.first_name, c.last_name, f.title, r.rental_date FROM rental r JOIN customer c ON r.customer_id = c.customer_id JOIN inventory i ON r.inventory_id = i.inventory_id JOIN film f ON i.film_id = f.film_id WHERE r.return_date IS NULL;","difficulty":"medium","ops":["multi_join","filter_null"],"grain":"detail","domain":"rental","multi_hop":3},
-  {"id":"dvdrental_20","question":"查询每部电影的总租金收入，按收入降序","sql":"SELECT f.title, SUM(p.amount) AS revenue FROM film f JOIN inventory i ON f.film_id = i.film_id JOIN rental r ON i.inventory_id = r.inventory_id JOIN payment p ON r.rental_id = p.rental_id GROUP BY f.film_id, f.title ORDER BY revenue DESC;","difficulty":"medium","ops":["multi_join","group_by","order_by"],"grain":"aggregate","domain":"film","multi_hop":3},
-  {"id":"dvdrental_21","question":"查询属于Family、Animation、Documentary分类的电影标题","sql":"SELECT f.title FROM film f JOIN film_category fc ON f.film_id = fc.film_id JOIN category c ON fc.category_id = c.category_id WHERE c.name IN ('Family','Animation','Documentary');","difficulty":"medium","ops":["multi_join"],"grain":"detail","domain":"category","multi_hop":2},
-  {"id":"dvdrental_22","question":"找出租赁价格是2.99或者4.99、评级R、标题包含L的前10部电影","sql":"SELECT title, rental_rate, rating FROM film WHERE rating='R' AND title LIKE '%L%' AND rental_rate IN (2.99, 4.99) LIMIT 10;","difficulty":"medium","ops":["single_table","limit"],"grain":"top_n","domain":"film","multi_hop":0},
-  {"id":"dvdrental_23","question":"计算每部电影的平均租赁时长","sql":"SELECT f.title, AVG(r.return_date - r.rental_date) AS avg_rent_dur FROM film f JOIN inventory i ON f.film_id = i.film_id JOIN rental r ON i.inventory_id = r.inventory_id GROUP BY f.film_id, f.title;","difficulty":"hard","ops":["multi_join","group_by"],"grain":"aggregate","domain":"film","multi_hop":2},
-  {"id":"dvdrental_24","question":"统计每个分类的租金总收入，只保留总收入大于2000的分类，按收入降序","sql":"SELECT c.name, SUM(p.amount) AS total_revenue FROM category c JOIN film_category fc ON c.category_id = fc.category_id JOIN film f ON fc.film_id = f.film_id JOIN inventory i ON f.film_id = i.film_id JOIN rental r ON i.inventory_id = r.inventory_id JOIN payment p ON r.rental_id = p.rental_id GROUP BY c.category_id, c.name HAVING SUM(p.amount) > 2000 ORDER BY total_revenue DESC;","difficulty":"hard","ops":["multi_join","group_by","having","order_by"],"grain":"aggregate","domain":"category","multi_hop":5},
-  {"id":"dvdrental_25","question":"查询每个客户平均每笔租赁消费金额","sql":"SELECT customer_id, AVG(amount) AS avg_amount FROM payment GROUP BY customer_id;","difficulty":"medium","ops":["group_by"],"grain":"aggregate","domain":"payment","multi_hop":0},
-  {"id":"dvdrental_26","question":"找出哪些电影没有任何演员参演","sql":"SELECT f.title FROM film f LEFT JOIN film_actor fa ON f.film_id = fa.film_id WHERE fa.actor_id IS NULL;","difficulty":"hard","ops":["multi_join","filter_null"],"grain":"detail","domain":"film","multi_hop":1},
-  {"id":"dvdrental_27","question":"找出哪些演员没有出演任何电影","sql":"SELECT a.first_name, a.last_name FROM actor a LEFT JOIN film_actor fa ON a.actor_id = fa.actor_id WHERE fa.film_id IS NULL;","difficulty":"hard","ops":["multi_join","filter_null"],"grain":"detail","domain":"actor","multi_hop":1},
-  {"id":"dvdrental_28","question":"使用窗口函数，给每个分类内电影按租赁收入排名","sql":"WITH film_rev AS (SELECT c.name cat_name, f.title, SUM(p.amount) rev FROM category c JOIN film_category fc ON c.category_id=fc.category_id JOIN film f ON fc.film_id=f.film_id JOIN inventory i ON f.film_id=i.film_id JOIN rental r ON i.inventory_id=r.inventory_id JOIN payment p ON r.rental_id=p.rental_id GROUP BY c.name, f.title) SELECT *, RANK() OVER (PARTITION BY cat_name ORDER BY rev DESC) AS rk FROM film_rev;","difficulty":"hard","ops":["multi_join","group_by","cte","window_function"],"grain":"aggregate","domain":"category","multi_hop":5},
-  {"id":"dvdrental_29","question":"查询消费总额前三的客户","sql":"SELECT c.first_name, c.last_name, SUM(p.amount) total FROM customer c JOIN payment p ON c.customer_id=p.customer_id GROUP BY c.customer_id, c.first_name, c.last_name ORDER BY total DESC LIMIT 3;","difficulty":"medium","ops":["multi_join","group_by","order_by","limit"],"grain":"top_n","domain":"customer","multi_hop":1},
-  {"id":"dvdrental_30","question":"找出地址里district为空的客户","sql":"SELECT c.first_name, c.last_name FROM customer c JOIN address a ON c.address_id = a.address_id WHERE a.district IS NULL OR a.district = '';","difficulty":"easy","ops":["multi_join","filter_null"],"grain":"detail","domain":"customer","multi_hop":1},
-  {"id":"dvdrental_31","question":"统计每个城市有多少客户","sql":"SELECT ci.city, COUNT(c.customer_id) AS cust_cnt FROM city ci JOIN address a ON ci.city_id = a.city_id JOIN customer c ON a.address_id = c.address_id GROUP BY ci.city_id, ci.city ORDER BY cust_cnt DESC;","difficulty":"medium","ops":["multi_join","group_by","order_by"],"grain":"aggregate","domain":"city","multi_hop":2},
-  {"id":"dvdrental_32","question":"查询2005年5月的总营收","sql":"SELECT SUM(amount) FROM payment WHERE payment_date >= '2005-05-01' AND payment_date < '2005-06-01';","difficulty":"medium","ops":["single_table","date_filter"],"grain":"single_value","domain":"payment","multi_hop":0},
-  {"id":"dvdrental_33","question":"找出租金收入高于该分类平均收入的电影","sql":"WITH cat_avg AS (SELECT c.name, AVG(rev) avg_rev FROM (SELECT c.name, f.title, SUM(p.amount) rev FROM category c JOIN film_category fc ON c.category_id=fc.category_id JOIN film f ON fc.film_id=f.film_id JOIN inventory i ON f.film_id=i.film_id JOIN rental r ON i.inventory_id=r.inventory_id JOIN payment p ON r.rental_id=p.rental_id GROUP BY c.name, f.title) t GROUP BY c.name), film_rev AS (SELECT c.name cat_name, f.title, SUM(p.amount) rev FROM category c JOIN film_category fc ON c.category_id=fc.category_id JOIN film f ON fc.film_id=f.film_id JOIN inventory i ON f.film_id=i.film_id JOIN rental r ON i.inventory_id=r.inventory_id JOIN payment p ON r.rental_id=p.rental_id GROUP BY c.name, f.title) SELECT fr.* FROM film_rev fr JOIN cat_avg ca ON fr.cat_name=ca.name WHERE fr.rev > ca.avg_rev;","difficulty":"hard","ops":["multi_join","group_by","cte"],"grain":"detail","domain":"category","multi_hop":5},
-  {"id":"dvdrental_34","question":"查询每部电影库存有多少份拷贝","sql":"SELECT f.title, COUNT(i.inventory_id) AS stock_count FROM film f LEFT JOIN inventory i ON f.film_id = i.film_id GROUP BY f.film_id, f.title;","difficulty":"medium","ops":["multi_join","group_by"],"grain":"aggregate","domain":"film","multi_hop":1},
-  {"id":"dvdrental_35","question":"找出没有库存的电影","sql":"SELECT f.title FROM film f LEFT JOIN inventory i ON f.film_id = i.film_id WHERE i.inventory_id IS NULL;","difficulty":"hard","ops":["multi_join","filter_null"],"grain":"detail","domain":"film","multi_hop":1},
-  {"id":"dvdrental_36","question":"统计每个员工在2005年6月的收款金额","sql":"SELECT s.first_name, s.last_name, SUM(p.amount) AS total FROM staff s JOIN payment p ON s.staff_id = p.staff_id WHERE p.payment_date BETWEEN '2005-06-01' AND '2005-07-01' GROUP BY s.staff_id, s.first_name, s.last_name;","difficulty":"medium","ops":["multi_join","group_by","date_filter"],"grain":"aggregate","domain":"staff","multi_hop":1},
-  {"id":"dvdrental_37","question":"查询租赁次数最多的前5部电影","sql":"SELECT f.title, COUNT(r.rental_id) rent_times FROM film f JOIN inventory i ON f.film_id=i.film_id JOIN rental r ON i.inventory_id=r.inventory_id GROUP BY f.film_id, f.title ORDER BY rent_times DESC LIMIT 5;","difficulty":"medium","ops":["multi_join","group_by","order_by","limit"],"grain":"top_n","domain":"film","multi_hop":2},
-  {"id":"dvdrental_38","question":"查询哪些客户从来没有租过电影","sql":"SELECT c.first_name, c.last_name FROM customer c LEFT JOIN rental r ON c.customer_id = r.customer_id WHERE r.rental_id IS NULL;","difficulty":"hard","ops":["multi_join","filter_null"],"grain":"detail","domain":"customer","multi_hop":1},
-  {"id":"dvdrental_39","question":"统计不同评级电影的平均时长","sql":"SELECT rating, AVG(length) avg_len FROM film GROUP BY rating;","difficulty":"medium","ops":["single_table","group_by"],"grain":"aggregate","domain":"film","multi_hop":0},
-  {"id":"dvdrental_40","question":"找出描述里面包含 'Drama' 的电影","sql":"SELECT title, description FROM film WHERE description ILIKE '%drama%';","difficulty":"easy","ops":["single_table"],"grain":"detail","domain":"film","multi_hop":0},
-  {"id":"dvdrental_41","question":"查询国家对应的城市数量","sql":"SELECT co.country, COUNT(ci.city_id) city_count FROM country co JOIN city ci ON co.country_id = ci.country_id GROUP BY co.country_id, co.country;","difficulty":"medium","ops":["multi_join","group_by"],"grain":"aggregate","domain":"country","multi_hop":1},
-  {"id":"dvdrental_42","question":"找出所有发生在2006年的支付记录","sql":"SELECT * FROM payment WHERE payment_date >= '2006-01-01';","difficulty":"easy","ops":["single_table","date_filter"],"grain":"detail","domain":"payment","multi_hop":0},
-  {"id":"dvdrental_43","question":"使用CTE找出消费总额排名前20%的客户","sql":"WITH cust_total AS (SELECT customer_id, SUM(amount) total FROM payment GROUP BY customer_id) SELECT * FROM cust_total WHERE total >= PERCENTILE_CONT(0.8) WITHIN GROUP (ORDER BY total) OVER ();","difficulty":"hard","ops":["cte","group_by","window_function"],"grain":"detail","domain":"customer","multi_hop":0},
-  {"id":"dvdrental_44","question":"统计每个月的总租赁收入，按月排序","sql":"SELECT DATE_TRUNC('month', payment_date) AS pay_month, SUM(amount) AS month_rev FROM payment GROUP BY pay_month ORDER BY pay_month;","difficulty":"hard","ops":["group_by","order_by"],"grain":"aggregate","domain":"payment","multi_hop":0},
-  {"id":"dvdrental_45","question":"找出同一客户同一天多次租赁的记录","sql":"SELECT customer_id, DATE(rental_date), COUNT(*) cnt FROM rental GROUP BY customer_id, DATE(rental_date) HAVING COUNT(*) > 1 ORDER BY cnt DESC;","difficulty":"hard","ops":["group_by","having","order_by"],"grain":"detail","domain":"rental","multi_hop":0},
-  {"id":"dvdrental_46","question":"查询每部电影最长和最短租赁间隔","sql":"SELECT f.title, MAX(r.return_date - r.rental_date) max_rent, MIN(r.return_date - r.rental_date) min_rent FROM film f JOIN inventory i ON f.film_id=i.film_id JOIN rental r ON i.inventory_id=r.inventory_id WHERE r.return_date IS NOT NULL GROUP BY f.film_id, f.title;","difficulty":"hard","ops":["multi_join","group_by","filter_null"],"grain":"aggregate","domain":"film","multi_hop":2}
+  {
+    "id": "dvdrental_01",
+    "question": "列出所有演员的名字，按姓氏升序排序（结果超过 20 条时只输出前 20 条）",
+    "sql": "SELECT first_name, last_name FROM actor ORDER BY last_name ASC;",
+    "difficulty": "easy",
+    "ops": [
+      "single_table",
+      "order_by"
+    ],
+    "grain": "detail",
+    "domain": "actor",
+    "multi_hop": 0
+  },
+  {
+    "id": "dvdrental_02",
+    "question": "找出姓氏以 'W' 开头的演员",
+    "sql": "SELECT * FROM actor WHERE last_name LIKE 'W%';",
+    "difficulty": "easy",
+    "ops": [
+      "single_table"
+    ],
+    "grain": "detail",
+    "domain": "actor",
+    "multi_hop": 0
+  },
+  {
+    "id": "dvdrental_03",
+    "question": "统计一共有多少部电影",
+    "sql": "SELECT COUNT(*) AS film_count FROM film;",
+    "difficulty": "easy",
+    "ops": [
+      "aggregate",
+      "count",
+      "single_table"
+    ],
+    "grain": "single_value",
+    "domain": "film",
+    "multi_hop": 0
+  },
+  {
+    "id": "dvdrental_04",
+    "question": "找出评级为 PG 的所有电影，返回标题和租赁价格（结果超过 20 条时只输出前 20 条）",
+    "sql": "SELECT title, rental_rate FROM film WHERE rating = 'PG';",
+    "difficulty": "easy",
+    "ops": [
+      "single_table"
+    ],
+    "grain": "detail",
+    "domain": "film",
+    "multi_hop": 0
+  },
+  {
+    "id": "dvdrental_05",
+    "question": "找出替换成本在 10 到 20 之间的电影（结果超过 20 条时只输出前 20 条）",
+    "sql": "SELECT title, replacement_cost FROM film WHERE replacement_cost BETWEEN 10 AND 20;",
+    "difficulty": "easy",
+    "ops": [
+      "date_filter",
+      "single_table"
+    ],
+    "grain": "detail",
+    "domain": "film",
+    "multi_hop": 0
+  },
+  {
+    "id": "dvdrental_06",
+    "question": "找出标题里面包含 'Action' 的电影",
+    "sql": "SELECT title FROM film WHERE title ILIKE '%action%';",
+    "difficulty": "easy",
+    "ops": [
+      "single_table"
+    ],
+    "grain": "detail",
+    "domain": "film",
+    "multi_hop": 0
+  },
+  {
+    "id": "dvdrental_07",
+    "question": "查询所有不同的电影评级有哪些",
+    "sql": "SELECT DISTINCT rating FROM film;",
+    "difficulty": "easy",
+    "ops": [
+      "distinct",
+      "single_table"
+    ],
+    "grain": "detail",
+    "domain": "film",
+    "multi_hop": 0
+  },
+  {
+    "id": "dvdrental_08",
+    "question": "统计客户一共有多少个不同的地区district",
+    "sql": "SELECT COUNT(DISTINCT district) FROM address;",
+    "difficulty": "easy",
+    "ops": [
+      "aggregate",
+      "count",
+      "distinct",
+      "single_table"
+    ],
+    "grain": "distinct_count",
+    "domain": "address",
+    "multi_hop": 0
+  },
+  {
+    "id": "dvdrental_09",
+    "question": "列出所有分类名称",
+    "sql": "SELECT name FROM category;",
+    "difficulty": "easy",
+    "ops": [
+      "single_table"
+    ],
+    "grain": "detail",
+    "domain": "category",
+    "multi_hop": 0
+  },
+  {
+    "id": "dvdrental_10",
+    "question": "查询2005年5月1日到2005年6月1日之间的租赁记录（结果超过 20 条时只输出前 20 条）",
+    "sql": "SELECT * FROM rental WHERE rental_date BETWEEN '2005-05-01' AND '2005-06-01';",
+    "difficulty": "easy",
+    "ops": [
+      "single_table",
+      "date_filter"
+    ],
+    "grain": "detail",
+    "domain": "rental",
+    "multi_hop": 0
+  },
+  {
+    "id": "dvdrental_11",
+    "question": "统计每一种评级的电影数量",
+    "sql": "SELECT rating, COUNT(*) AS cnt FROM film GROUP BY rating;",
+    "difficulty": "medium",
+    "ops": [
+      "aggregate",
+      "count",
+      "group_by",
+      "single_table"
+    ],
+    "grain": "aggregate",
+    "domain": "film",
+    "multi_hop": 0
+  },
+  {
+    "id": "dvdrental_12",
+    "question": "找出时长大于120分钟的电影，按时长从大到小排序（结果超过 20 条时只输出前 20 条）",
+    "sql": "SELECT title, length FROM film WHERE length > 120 ORDER BY length DESC;",
+    "difficulty": "medium",
+    "ops": [
+      "single_table",
+      "order_by"
+    ],
+    "grain": "detail",
+    "domain": "film",
+    "multi_hop": 0
+  },
+  {
+    "id": "dvdrental_13",
+    "question": "统计每个演员出演的电影数量，取前10名参演最多的演员",
+    "sql": "SELECT a.first_name, a.last_name, COUNT(fa.film_id) AS movie_count FROM actor a LEFT JOIN film_actor fa ON a.actor_id = fa.actor_id GROUP BY a.actor_id, a.first_name, a.last_name ORDER BY movie_count DESC LIMIT 10;",
+    "difficulty": "medium",
+    "ops": [
+      "aggregate",
+      "count",
+      "group_by",
+      "limit",
+      "multi_join",
+      "order_by"
+    ],
+    "grain": "top_n",
+    "domain": "actor",
+    "multi_hop": 1
+  },
+  {
+    "id": "dvdrental_14",
+    "question": "查询电影《ACADEMY DINOSAUR》对应的所有演员",
+    "sql": "SELECT a.first_name, a.last_name FROM actor a JOIN film_actor fa ON a.actor_id = fa.actor_id JOIN film f ON fa.film_id = f.film_id WHERE f.title = 'ACADEMY DINOSAUR';",
+    "difficulty": "medium",
+    "ops": [
+      "multi_join"
+    ],
+    "grain": "detail",
+    "domain": "actor",
+    "multi_hop": 2
+  },
+  {
+    "id": "dvdrental_15",
+    "question": "统计每个分类下电影的数量，只保留电影数量大于60的分类",
+    "sql": "SELECT c.name, COUNT(fc.film_id) AS film_cnt FROM category c JOIN film_category fc ON c.category_id = fc.category_id GROUP BY c.category_id, c.name HAVING COUNT(fc.film_id) > 60;",
+    "difficulty": "medium",
+    "ops": [
+      "aggregate",
+      "count",
+      "group_by",
+      "having",
+      "multi_join"
+    ],
+    "grain": "aggregate",
+    "domain": "category",
+    "multi_hop": 1
+  },
+  {
+    "id": "dvdrental_16",
+    "question": "查询客户以及他们对应的城市名称（结果超过 20 条时只输出前 20 条）",
+    "sql": "SELECT c.first_name, c.last_name, ci.city FROM customer c JOIN address a ON c.address_id = a.address_id JOIN city ci ON a.city_id = ci.city_id;",
+    "difficulty": "medium",
+    "ops": [
+      "multi_join"
+    ],
+    "grain": "detail",
+    "domain": "customer",
+    "multi_hop": 2
+  },
+  {
+    "id": "dvdrental_17",
+    "question": "统计每个员工处理了多少笔支付订单",
+    "sql": "SELECT s.first_name, s.last_name, COUNT(p.payment_id) AS pay_cnt FROM staff s JOIN payment p ON s.staff_id = p.staff_id GROUP BY s.staff_id, s.first_name, s.last_name;",
+    "difficulty": "medium",
+    "ops": [
+      "aggregate",
+      "count",
+      "group_by",
+      "multi_join"
+    ],
+    "grain": "aggregate",
+    "domain": "staff",
+    "multi_hop": 1
+  },
+  {
+    "id": "dvdrental_18",
+    "question": "找出总消费超过100元的客户，输出客户id和总金额（结果超过 20 条时只输出前 20 条）",
+    "sql": "SELECT customer_id, SUM(amount) AS total_pay FROM payment GROUP BY customer_id HAVING SUM(amount) > 100;",
+    "difficulty": "medium",
+    "ops": [
+      "aggregate",
+      "group_by",
+      "having",
+      "single_table",
+      "sum"
+    ],
+    "grain": "aggregate",
+    "domain": "payment",
+    "multi_hop": 0
+  },
+  {
+    "id": "dvdrental_19",
+    "question": "找出还没有归还的租赁记录，显示客户姓名、电影名称、租赁时间（结果超过 20 条时只输出前 20 条）",
+    "sql": "SELECT c.first_name, c.last_name, f.title, r.rental_date FROM rental r JOIN customer c ON r.customer_id = c.customer_id JOIN inventory i ON r.inventory_id = i.inventory_id JOIN film f ON i.film_id = f.film_id WHERE r.return_date IS NULL;",
+    "difficulty": "medium",
+    "ops": [
+      "multi_join",
+      "filter_null"
+    ],
+    "grain": "detail",
+    "domain": "rental",
+    "multi_hop": 3
+  },
+  {
+    "id": "dvdrental_20",
+    "question": "查询每部电影的总租金收入，按收入降序（结果超过 20 条时只输出前 20 条）",
+    "sql": "SELECT f.title, SUM(p.amount) AS revenue FROM film f JOIN inventory i ON f.film_id = i.film_id JOIN rental r ON i.inventory_id = r.inventory_id JOIN payment p ON r.rental_id = p.rental_id GROUP BY f.film_id, f.title ORDER BY revenue DESC;",
+    "difficulty": "medium",
+    "ops": [
+      "aggregate",
+      "group_by",
+      "multi_join",
+      "order_by",
+      "sum"
+    ],
+    "grain": "aggregate",
+    "domain": "film",
+    "multi_hop": 3
+  },
+  {
+    "id": "dvdrental_21",
+    "question": "查询属于Family、Animation、Documentary分类的电影标题（结果超过 20 条时只输出前 20 条）",
+    "sql": "SELECT f.title FROM film f JOIN film_category fc ON f.film_id = fc.film_id JOIN category c ON fc.category_id = c.category_id WHERE c.name IN ('Family','Animation','Documentary');",
+    "difficulty": "medium",
+    "ops": [
+      "multi_join"
+    ],
+    "grain": "detail",
+    "domain": "category",
+    "multi_hop": 2
+  },
+  {
+    "id": "dvdrental_22",
+    "question": "找出租赁价格是2.99或者4.99、评级R、标题包含L的前10部电影",
+    "sql": "SELECT title, rental_rate, rating FROM film WHERE rating='R' AND title LIKE '%L%' AND rental_rate IN (2.99, 4.99) LIMIT 10;",
+    "difficulty": "medium",
+    "ops": [
+      "limit",
+      "single_table"
+    ],
+    "grain": "detail",
+    "domain": "film",
+    "multi_hop": 0
+  },
+  {
+    "id": "dvdrental_23",
+    "question": "计算每部电影的平均租赁时长（结果超过 20 条时只输出前 20 条）",
+    "sql": "SELECT f.title, AVG(r.return_date - r.rental_date) AS avg_rent_dur FROM film f JOIN inventory i ON f.film_id = i.film_id JOIN rental r ON i.inventory_id = r.inventory_id GROUP BY f.film_id, f.title;",
+    "difficulty": "hard",
+    "ops": [
+      "aggregate",
+      "avg",
+      "group_by",
+      "multi_join"
+    ],
+    "grain": "aggregate",
+    "domain": "film",
+    "multi_hop": 2
+  },
+  {
+    "id": "dvdrental_24",
+    "question": "统计每个分类的租金总收入，只保留总收入大于2000的分类，按收入降序",
+    "sql": "SELECT c.name, SUM(p.amount) AS total_revenue FROM category c JOIN film_category fc ON c.category_id = fc.category_id JOIN film f ON fc.film_id = f.film_id JOIN inventory i ON f.film_id = i.film_id JOIN rental r ON i.inventory_id = r.inventory_id JOIN payment p ON r.rental_id = p.rental_id GROUP BY c.category_id, c.name HAVING SUM(p.amount) > 2000 ORDER BY total_revenue DESC;",
+    "difficulty": "hard",
+    "ops": [
+      "aggregate",
+      "date_filter",
+      "group_by",
+      "having",
+      "multi_join",
+      "order_by",
+      "sum"
+    ],
+    "grain": "aggregate",
+    "domain": "category",
+    "multi_hop": 5
+  },
+  {
+    "id": "dvdrental_25",
+    "question": "查询每个客户平均每笔租赁消费金额（结果超过 20 条时只输出前 20 条）",
+    "sql": "SELECT customer_id, AVG(amount) AS avg_amount FROM payment GROUP BY customer_id;",
+    "difficulty": "medium",
+    "ops": [
+      "aggregate",
+      "avg",
+      "group_by",
+      "single_table"
+    ],
+    "grain": "aggregate",
+    "domain": "payment",
+    "multi_hop": 0
+  },
+  {
+    "id": "dvdrental_26",
+    "question": "找出哪些电影没有任何演员参演",
+    "sql": "SELECT f.title FROM film f LEFT JOIN film_actor fa ON f.film_id = fa.film_id WHERE fa.actor_id IS NULL;",
+    "difficulty": "hard",
+    "ops": [
+      "multi_join",
+      "filter_null"
+    ],
+    "grain": "detail",
+    "domain": "film",
+    "multi_hop": 1
+  },
+  {
+    "id": "dvdrental_27",
+    "question": "找出哪些演员没有出演任何电影",
+    "sql": "SELECT a.first_name, a.last_name FROM actor a LEFT JOIN film_actor fa ON a.actor_id = fa.actor_id WHERE fa.film_id IS NULL;",
+    "difficulty": "hard",
+    "ops": [
+      "multi_join",
+      "filter_null"
+    ],
+    "grain": "detail",
+    "domain": "actor",
+    "multi_hop": 1
+  },
+  {
+    "id": "dvdrental_28",
+    "question": "使用窗口函数，给每个分类内电影按租赁收入排名（结果超过 20 条时只输出前 20 条）",
+    "sql": "WITH film_rev AS (SELECT c.name cat_name, f.title, SUM(p.amount) rev FROM category c JOIN film_category fc ON c.category_id=fc.category_id JOIN film f ON fc.film_id=f.film_id JOIN inventory i ON f.film_id=i.film_id JOIN rental r ON i.inventory_id=r.inventory_id JOIN payment p ON r.rental_id=p.rental_id GROUP BY c.name, f.title) SELECT *, RANK() OVER (PARTITION BY cat_name ORDER BY rev DESC) AS rk FROM film_rev;",
+    "difficulty": "hard",
+    "ops": [
+      "aggregate",
+      "cte",
+      "group_by",
+      "multi_join",
+      "order_by",
+      "sum",
+      "window_function"
+    ],
+    "grain": "aggregate",
+    "domain": "category",
+    "multi_hop": 5
+  },
+  {
+    "id": "dvdrental_29",
+    "question": "查询消费总额前三的客户",
+    "sql": "SELECT c.first_name, c.last_name, SUM(p.amount) total FROM customer c JOIN payment p ON c.customer_id=p.customer_id GROUP BY c.customer_id, c.first_name, c.last_name ORDER BY total DESC LIMIT 3;",
+    "difficulty": "medium",
+    "ops": [
+      "aggregate",
+      "group_by",
+      "limit",
+      "multi_join",
+      "order_by",
+      "sum"
+    ],
+    "grain": "top_n",
+    "domain": "customer",
+    "multi_hop": 1
+  },
+  {
+    "id": "dvdrental_30",
+    "question": "找出地址里district为空的客户",
+    "sql": "SELECT c.first_name, c.last_name FROM customer c JOIN address a ON c.address_id = a.address_id WHERE a.district IS NULL OR a.district = '';",
+    "difficulty": "easy",
+    "ops": [
+      "multi_join",
+      "filter_null"
+    ],
+    "grain": "detail",
+    "domain": "customer",
+    "multi_hop": 1
+  },
+  {
+    "id": "dvdrental_31",
+    "question": "统计每个城市有多少客户（结果超过 20 条时只输出前 20 条）",
+    "sql": "SELECT ci.city, COUNT(c.customer_id) AS cust_cnt FROM city ci JOIN address a ON ci.city_id = a.city_id JOIN customer c ON a.address_id = c.address_id GROUP BY ci.city_id, ci.city ORDER BY cust_cnt DESC;",
+    "difficulty": "medium",
+    "ops": [
+      "aggregate",
+      "count",
+      "group_by",
+      "multi_join",
+      "order_by"
+    ],
+    "grain": "aggregate",
+    "domain": "city",
+    "multi_hop": 2
+  },
+  {
+    "id": "dvdrental_32",
+    "question": "查询2005年5月的总营收",
+    "sql": "SELECT SUM(amount) FROM payment WHERE payment_date >= '2005-05-01' AND payment_date < '2005-06-01';",
+    "difficulty": "medium",
+    "ops": [
+      "aggregate",
+      "date_filter",
+      "single_table",
+      "sum"
+    ],
+    "grain": "single_value",
+    "domain": "payment",
+    "multi_hop": 0
+  },
+  {
+    "id": "dvdrental_33",
+    "question": "找出租金收入高于该分类平均收入的电影",
+    "sql": "WITH film_rev AS (SELECT c.name AS cat_name, f.title, SUM(p.amount) rev FROM category c JOIN film_category fc ON c.category_id=fc.category_id JOIN film f ON fc.film_id=f.film_id JOIN inventory i ON f.film_id=i.film_id JOIN rental r ON i.inventory_id=r.inventory_id JOIN payment p ON r.rental_id=p.rental_id GROUP BY c.name, f.title), cat_avg AS (SELECT cat_name, AVG(rev) avg_rev FROM film_rev GROUP BY cat_name) SELECT fr.* FROM film_rev fr JOIN cat_avg ca ON fr.cat_name=ca.cat_name WHERE fr.rev > ca.avg_rev;",
+    "difficulty": "hard",
+    "ops": [
+      "aggregate",
+      "avg",
+      "cte",
+      "group_by",
+      "multi_join",
+      "subquery",
+      "sum"
+    ],
+    "grain": "aggregate",
+    "domain": "category",
+    "multi_hop": 13
+  },
+  {
+    "id": "dvdrental_34",
+    "question": "查询每部电影库存有多少份拷贝（结果超过 20 条时只输出前 20 条）",
+    "sql": "SELECT f.title, COUNT(i.inventory_id) AS stock_count FROM film f LEFT JOIN inventory i ON f.film_id = i.film_id GROUP BY f.film_id, f.title;",
+    "difficulty": "medium",
+    "ops": [
+      "aggregate",
+      "count",
+      "group_by",
+      "multi_join"
+    ],
+    "grain": "aggregate",
+    "domain": "film",
+    "multi_hop": 1
+  },
+  {
+    "id": "dvdrental_35",
+    "question": "找出没有库存的电影（结果超过 20 条时只输出前 20 条）",
+    "sql": "SELECT f.title FROM film f LEFT JOIN inventory i ON f.film_id = i.film_id WHERE i.inventory_id IS NULL;",
+    "difficulty": "hard",
+    "ops": [
+      "multi_join",
+      "filter_null"
+    ],
+    "grain": "detail",
+    "domain": "film",
+    "multi_hop": 1
+  },
+  {
+    "id": "dvdrental_36",
+    "question": "统计每个员工在2005年6月的收款金额",
+    "sql": "SELECT s.first_name, s.last_name, SUM(p.amount) AS total FROM staff s JOIN payment p ON s.staff_id = p.staff_id WHERE p.payment_date BETWEEN '2005-06-01' AND '2005-07-01' GROUP BY s.staff_id, s.first_name, s.last_name;",
+    "difficulty": "medium",
+    "ops": [
+      "aggregate",
+      "date_filter",
+      "group_by",
+      "multi_join",
+      "sum"
+    ],
+    "grain": "aggregate",
+    "domain": "staff",
+    "multi_hop": 1
+  },
+  {
+    "id": "dvdrental_37",
+    "question": "查询租赁次数最多的前5部电影",
+    "sql": "SELECT f.title, COUNT(r.rental_id) rent_times FROM film f JOIN inventory i ON f.film_id=i.film_id JOIN rental r ON i.inventory_id=r.inventory_id GROUP BY f.film_id, f.title ORDER BY rent_times DESC LIMIT 5;",
+    "difficulty": "medium",
+    "ops": [
+      "aggregate",
+      "count",
+      "group_by",
+      "limit",
+      "multi_join",
+      "order_by"
+    ],
+    "grain": "top_n",
+    "domain": "film",
+    "multi_hop": 2
+  },
+  {
+    "id": "dvdrental_38",
+    "question": "查询哪些客户从来没有租过电影",
+    "sql": "SELECT c.first_name, c.last_name FROM customer c LEFT JOIN rental r ON c.customer_id = r.customer_id WHERE r.rental_id IS NULL;",
+    "difficulty": "hard",
+    "ops": [
+      "multi_join",
+      "filter_null"
+    ],
+    "grain": "detail",
+    "domain": "customer",
+    "multi_hop": 1
+  },
+  {
+    "id": "dvdrental_39",
+    "question": "统计不同评级电影的平均时长",
+    "sql": "SELECT rating, AVG(length) avg_len FROM film GROUP BY rating;",
+    "difficulty": "medium",
+    "ops": [
+      "aggregate",
+      "avg",
+      "group_by",
+      "single_table"
+    ],
+    "grain": "aggregate",
+    "domain": "film",
+    "multi_hop": 0
+  },
+  {
+    "id": "dvdrental_40",
+    "question": "找出描述里面包含 'Drama' 的电影（结果超过 20 条时只输出前 20 条）",
+    "sql": "SELECT title, description FROM film WHERE description ILIKE '%drama%';",
+    "difficulty": "easy",
+    "ops": [
+      "single_table"
+    ],
+    "grain": "detail",
+    "domain": "film",
+    "multi_hop": 0
+  },
+  {
+    "id": "dvdrental_41",
+    "question": "查询国家对应的城市数量（结果超过 20 条时只输出前 20 条）",
+    "sql": "SELECT co.country, COUNT(ci.city_id) city_count FROM country co JOIN city ci ON co.country_id = ci.country_id GROUP BY co.country_id, co.country;",
+    "difficulty": "medium",
+    "ops": [
+      "aggregate",
+      "count",
+      "group_by",
+      "multi_join"
+    ],
+    "grain": "aggregate",
+    "domain": "country",
+    "multi_hop": 1
+  },
+  {
+    "id": "dvdrental_42",
+    "question": "找出所有发生在2006年的支付记录（结果超过 20 条时只输出前 20 条）",
+    "sql": "SELECT * FROM payment WHERE payment_date >= '2006-01-01';",
+    "difficulty": "easy",
+    "ops": [
+      "single_table",
+      "date_filter"
+    ],
+    "grain": "detail",
+    "domain": "payment",
+    "multi_hop": 0
+  },
+  {
+    "id": "dvdrental_43",
+    "question": "使用CTE找出消费总额排名前20%的客户",
+    "sql": "WITH cust_total AS (SELECT customer_id, SUM(amount) total FROM payment GROUP BY customer_id), ranked AS (SELECT customer_id, total, PERCENT_RANK() OVER (ORDER BY total DESC) AS pr FROM cust_total) SELECT customer_id, total FROM ranked WHERE pr <= 0.2;",
+    "difficulty": "hard",
+    "ops": [
+      "aggregate",
+      "cte",
+      "group_by",
+      "order_by",
+      "single_table",
+      "sum"
+    ],
+    "grain": "aggregate",
+    "domain": "customer",
+    "multi_hop": 0
+  },
+  {
+    "id": "dvdrental_44",
+    "question": "统计每个月的总租赁收入，按月排序",
+    "sql": "SELECT DATE_TRUNC('month', payment_date) AS pay_month, SUM(amount) AS month_rev FROM payment GROUP BY pay_month ORDER BY pay_month;",
+    "difficulty": "hard",
+    "ops": [
+      "aggregate",
+      "group_by",
+      "order_by",
+      "single_table",
+      "sum"
+    ],
+    "grain": "aggregate",
+    "domain": "payment",
+    "multi_hop": 0
+  },
+  {
+    "id": "dvdrental_45",
+    "question": "找出同一客户同一天多次租赁的记录（结果超过 20 条时只输出前 20 条）",
+    "sql": "SELECT customer_id, DATE(rental_date), COUNT(*) cnt FROM rental GROUP BY customer_id, DATE(rental_date) HAVING COUNT(*) > 1 ORDER BY cnt DESC;",
+    "difficulty": "hard",
+    "ops": [
+      "aggregate",
+      "count",
+      "group_by",
+      "having",
+      "order_by",
+      "single_table"
+    ],
+    "grain": "aggregate",
+    "domain": "rental",
+    "multi_hop": 0
+  },
+  {
+    "id": "dvdrental_46",
+    "question": "查询每部电影最长和最短租赁间隔（结果超过 20 条时只输出前 20 条）",
+    "sql": "SELECT f.title, MAX(r.return_date - r.rental_date) max_rent, MIN(r.return_date - r.rental_date) min_rent FROM film f JOIN inventory i ON f.film_id=i.film_id JOIN rental r ON i.inventory_id=r.inventory_id WHERE r.return_date IS NOT NULL GROUP BY f.film_id, f.title;",
+    "difficulty": "hard",
+    "ops": [
+      "aggregate",
+      "filter_null",
+      "group_by",
+      "multi_join"
+    ],
+    "grain": "aggregate",
+    "domain": "film",
+    "multi_hop": 2
+  }
 ]

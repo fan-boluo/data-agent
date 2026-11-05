@@ -27,7 +27,7 @@ import re
 import sys
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from urllib.parse import quote_plus
@@ -49,18 +49,41 @@ TRACE_WAIT_S = 15             # 重放后等 trace 落库超时
 
 # ============================================================ 结果对比（EX 核心）
 
+_NULL_VALUES = {"", "null", "none", "nan", "nat", "-"}
+
+
 def _norm_value(v) -> str:
     """值规范化：数值统一浮点格式（消除 100 vs 100.0），interval 统一为天数，
-    其余字符串去空白小写。"""
+    日期统一为文本，NULL 类值统一为空串，其余字符串去空白小写。
+
+    注意 gold_rows 走 JSONB 缓存，datetime 取回时是 ISO 字符串（T 分隔、可能带时区），
+    与 agent 侧直接执行的 datetime 对象需归一，否则日期类题目会被误判为不匹配。
+    """
     if v is None:
         return ""
     if isinstance(v, bool):
         return "1" if v else "0"
+    if isinstance(v, Decimal):
+        v = float(v)
     if isinstance(v, timedelta):
         return f"{v.total_seconds() / 86400:.6f}".rstrip("0").rstrip(".")
     if isinstance(v, (int, float)):
         return f"{float(v):.6f}".rstrip("0").rstrip(".")
-    return re.sub(r"\s+", " ", str(v)).strip().lower()
+    if isinstance(v, datetime):
+        # 零点时间统一为纯日期（兼容 date 与 timestamp 两种来源）
+        if not (v.hour or v.minute or v.second):
+            return v.strftime("%Y-%m-%d")
+        return v.strftime("%Y-%m-%d %H:%M:%S")
+    if isinstance(v, date):
+        return v.strftime("%Y-%m-%d")
+    s = re.sub(r"\s+", " ", str(v)).strip()
+    # 统一日期时间：T/空格分隔、丢弃小数秒（agent 侧 datetime 格式化到秒，
+    # gold 缓存 JSON 保留微秒，截断后两侧可比）
+    m = re.match(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:\.\d+)?", s)
+    if m:
+        s = m.group(1) if m.group(2) == "00:00:00" else f"{m.group(1)} {m.group(2)}"
+    s = s.lower()
+    return "" if s in _NULL_VALUES else s
 
 
 def _depaginate(sql: str) -> str:
@@ -109,6 +132,105 @@ def rows_match(pred_rows, gold_rows) -> bool:
     return any(gold_sig == _sig(pred_rows, proj) for proj in projections)
 
 
+TOP_N_TOLERANCE = 20          # 题目约定"结果超 20 条只输出前 20 条"时，宽松匹配接受的行数
+LOOSE_ROW_LIMIT = 2000        # 宽松匹配的最大行数（超出行数不做 O(n²) 配对，避免评测过慢）
+
+
+def _row_values(row) -> list:
+    """行 → 值列表（结果为 dict 行，需取 values，避免把列名当值）。"""
+    return list(row.values()) if isinstance(row, dict) else list(row)
+
+
+def _loose_tokens(row) -> set[str]:
+    """行的宽松词元集：列值 + 值内分词片段 + 相邻 2~3 列拼接。
+
+    用于容忍表示差异：gold 拆成 first_name/last_name，agent 拼成 "Mike Hillyer"；
+    或 agent 多输出 id 等标识列（额外值不影响 gold 值被覆盖）。
+    """
+    vals = [_norm_value(v) for v in _row_values(row)]
+    toks = {v for v in vals if v}
+    for s in vals:
+        toks |= {p for p in re.split(r"[\s\-_/|、]+", s) if p}
+    for i in range(len(vals)):
+        for j in range(i + 2, min(len(vals), i + 3) + 1):
+            toks.add(" ".join(vals[i:j]))
+    return toks
+
+
+_NUM_RE = re.compile(r"-?\d+(?:\.\d+)?")
+_NUM_TOL = 0.01              # 数值容差：容忍 ROUND(x, 2)/浮点精度导致的末位差异
+
+
+def _date_prefix_hit(v: str, toks: set[str]) -> bool:
+    """日期粒度差异：gold '2005-05-01' 与 pred '2005-05' 这类同月不同精度视为匹配。"""
+    if not re.match(r"\d{4}-\d{2}", v):
+        return False
+    short = v[:7]
+    return any(
+        t.startswith(short) or short.startswith(t)
+        for t in toks if re.match(r"\d{4}-\d{2}", t)
+    )
+
+
+def _row_covered(gold_row, pred_tokens: set[str]) -> bool:
+    """gold 行的每个非空值都能在 pred 行的宽松词元中找到。
+
+    容差：数值允许 _NUM_TOL 偏差（ROUND/浮点精度），日期允许同月不同粒度
+    （DATE_TRUNC 的 '2005-05-01' vs to_char 的 '2005-05'）。
+    """
+    pnums = [float(t) for t in pred_tokens if _NUM_RE.fullmatch(t)]
+    for x in _row_values(gold_row):
+        v = _norm_value(x)
+        if not v or v in pred_tokens:
+            continue
+        if _NUM_RE.fullmatch(v) and any(abs(float(v) - p) <= _NUM_TOL for p in pnums):
+            continue
+        if _date_prefix_hit(v, pred_tokens):
+            continue
+        return False
+    return True
+
+
+def rows_match_relaxed(pred_rows, gold_rows) -> tuple[bool, str]:
+    """宽松 EX：gold 值级覆盖（容忍列增删/拼接拆分/行序），支持"只输出前 N 条"。
+
+    与严格匹配的区别是只约束"gold 的每个值必须出现"，允许 agent 附带标识列；
+    行数必须一致，或在 gold 超过 TOP_N_TOLERANCE 时 pred 恰为前 N 条子集。
+    """
+    if not gold_rows or not pred_rows:
+        return (not gold_rows and not pred_rows), "empty"
+    if len(gold_rows) > LOOSE_ROW_LIMIT or len(pred_rows) > LOOSE_ROW_LIMIT:
+        return False, ""
+
+    # 1. 全量等行数：gold 每行都能占用一个未被占用的 pred 行（行序无关）
+    if len(pred_rows) == len(gold_rows):
+        ptoks = [_loose_tokens(p) for p in pred_rows]
+        used = [False] * len(pred_rows)
+        for g in gold_rows:
+            for i, toks in enumerate(ptoks):
+                if not used[i] and _row_covered(g, toks):
+                    used[i] = True
+                    break
+            else:
+                return False, ""
+        return True, "relaxed"
+
+    # 2. top-N：题目要求只输出前 N 条，pred 每行需覆盖 gold 中一行（不可重复占用）
+    want = min(TOP_N_TOLERANCE, len(gold_rows))
+    if len(gold_rows) > TOP_N_TOLERANCE and len(pred_rows) == want:
+        ptoks = [_loose_tokens(p) for p in pred_rows]
+        used = [False] * len(gold_rows)
+        for toks in ptoks:
+            for i, g in enumerate(gold_rows):
+                if not used[i] and _row_covered(g, toks):
+                    used[i] = True
+                    break
+            else:
+                return False, ""
+        return True, f"top{TOP_N_TOLERANCE}"
+    return False, ""
+
+
 # ============================================================ 业务库执行
 
 async def fetch_rows(dsn: str, sql: str) -> tuple[list, str | None]:
@@ -130,9 +252,17 @@ async def meta_conn() -> asyncpg.Connection:
 
 
 def _since(s: str) -> datetime:
-    """--since 参数 → tz-aware UTC（asyncpg timestamptz 不接受 naive datetime）。"""
-    dt = datetime.fromisoformat(s or "1970-01-01")
-    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+    """--since 参数 → tz-aware UTC（asyncpg timestamptz 不接受 naive datetime）。
+
+    未带时区后缀时按本机时区解释：与 PostgreSQL 手写
+    `started_at > '2026-11-05T12:00:00'`（naive 字面量按会话时区解释）语义一致。
+    原先强制按 UTC 解释，导致本地 12:00 的时间点被当成 UTC 12:00（本地 20:00），
+    本地 12:00~20:00 之间产生的 trace 全部被漏掉。
+    """
+    dt = datetime.fromisoformat(s) if s else datetime(1970, 1, 1, tzinfo=timezone.utc)
+    if dt.tzinfo is None:
+        dt = dt.astimezone()  # naive → 本机时区
+    return dt.astimezone(timezone.utc)
 
 
 # ============================================================ 子命令：import-cases
@@ -172,22 +302,44 @@ async def cmd_import(args) -> None:
             question = str(case.get("question") or "").strip()
             if not question:
                 continue
-            row = await conn.fetchrow(
-                """
-                INSERT INTO telemetry.eval_cases
-                  (dataset_id, question, gold_sql, db_name, difficulty, ops, grain, multi_hop, status)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-                ON CONFLICT (dataset_id, question) DO UPDATE SET
-                  gold_sql = EXCLUDED.gold_sql, db_name = EXCLUDED.db_name,
-                  difficulty = EXCLUDED.difficulty, ops = EXCLUDED.ops, grain = EXCLUDED.grain,
-                  multi_hop = EXCLUDED.multi_hop, status = EXCLUDED.status, updated_at = now()
-                RETURNING (xmax = 0) AS inserted
-                """,
-                ds_id, question, str(case.get("gold_sql") or ""), str(args.db or case.get("db_name") or ""),
-                str(case.get("difficulty") or ""), str(case.get("ops") or ""),
-                str(case.get("grain") or ""), bool(case.get("multi_hop")),
-                str(args.status or case.get("status") or "draft"),
-            )
+            case_code = str(case.get("id") or "").strip() or None
+            # 优先按 case_code 覆盖（JSON 里的 id 字段），没 case_code 时按 question 兜底
+            if case_code:
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO telemetry.eval_cases
+                      (dataset_id, case_code, question, gold_sql, db_name, difficulty, ops, grain, multi_hop, status)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                    ON CONFLICT (dataset_id, case_code) DO UPDATE SET
+                      question = EXCLUDED.question,
+                      gold_sql = EXCLUDED.gold_sql, db_name = EXCLUDED.db_name,
+                      difficulty = EXCLUDED.difficulty, ops = EXCLUDED.ops, grain = EXCLUDED.grain,
+                      multi_hop = EXCLUDED.multi_hop, status = EXCLUDED.status, updated_at = now()
+                    RETURNING (xmax = 0) AS inserted
+                    """,
+                    ds_id, case_code, question, str(case.get("gold_sql") or ""),
+                    str(args.db or case.get("db_name") or ""),
+                    str(case.get("difficulty") or ""), str(case.get("ops") or ""),
+                    str(case.get("grain") or ""), bool(case.get("multi_hop")),
+                    str(args.status or case.get("status") or "draft"),
+                )
+            else:
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO telemetry.eval_cases
+                      (dataset_id, question, gold_sql, db_name, difficulty, ops, grain, multi_hop, status)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+                    ON CONFLICT (dataset_id, question) DO UPDATE SET
+                      gold_sql = EXCLUDED.gold_sql, db_name = EXCLUDED.db_name,
+                      difficulty = EXCLUDED.difficulty, ops = EXCLUDED.ops, grain = EXCLUDED.grain,
+                      multi_hop = EXCLUDED.multi_hop, status = EXCLUDED.status, updated_at = now()
+                    RETURNING (xmax = 0) AS inserted
+                    """,
+                    ds_id, question, str(case.get("gold_sql") or ""), str(args.db or case.get("db_name") or ""),
+                    str(case.get("difficulty") or ""), str(case.get("ops") or ""),
+                    str(case.get("grain") or ""), bool(case.get("multi_hop")),
+                    str(args.status or case.get("status") or "draft"),
+                )
             n_new += 1 if row["inserted"] else 0
             n_upd += 0 if row["inserted"] else 1
         total = await conn.fetchval(
@@ -222,18 +374,31 @@ async def _wait_trace(conn: asyncpg.Connection, trace_id: str) -> bool:
 
 
 async def cmd_replay(args) -> None:
-    """逐题重放：每题独立会话，trace_id = eval-{case_id}-{rand}；SSE 读到流结束。"""
+    """逐题重放：每题独立会话，trace_id = eval-{case_id}-{rand}；SSE 读到流结束。
+
+    默认重放所有 verified 题（按 dataset 过滤用 --dataset，指定具体 case 用 --ids）。
+    """
     token = await _login(args.base_url, args.account, args.password)
     conn = await meta_conn()
     try:
         cond = "status='verified'" if not args.all else "TRUE"
         params: list = []
         if args.ids:
-            cond += " AND id = ANY($1)"
+            cond += " AND c.id = ANY($1)"
             params.append([int(x) for x in args.ids.split(",") if x.strip()])
+        if args.dataset:
+            # 按 dataset name 过滤
+            ds_ids = [r['id'] for r in await conn.fetch(
+                "SELECT id FROM telemetry.eval_datasets WHERE name = ANY($1)",
+                args.dataset.split(","))]
+            if not ds_ids:
+                print(f"[WARN] dataset '{args.dataset}' 未找到任何 eval_datasets，无题目重放")
+                return
+            cond += f" AND c.dataset_id = ANY(${len(params)+1})"
+            params.append(ds_ids)
         params.append(args.limit)
         cases = await conn.fetch(
-            f"SELECT * FROM telemetry.eval_cases WHERE {cond} ORDER BY id LIMIT ${len(params)}", *params)
+            f"SELECT c.* FROM telemetry.eval_cases c WHERE {cond} ORDER BY c.id LIMIT ${len(params)}", *params)
         print(f"[OK] 待重放 {len(cases)} 题 → {args.base_url}")
         ok = fail = 0
         async with httpx.AsyncClient(base_url=args.base_url, timeout=args.timeout,
@@ -437,6 +602,12 @@ async def _score_one(conn, cache: dict, trace_id: str, case) -> dict:
         if rows_match(pred_rows, gold_rows):
             ves = min(1.0, gold_time / pred_time) if pred_time > 0 else 0.0
             return {"ex": 1.0, "ves": ves, "valid": 1.0, "category": "ok", "detail": ""}
+        # 严格匹配失败 → 宽松匹配（容忍列增删、姓名拼接拆分、只输出前 N 条）
+        hit, how = rows_match_relaxed(pred_rows, gold_rows)
+        if hit:
+            ves = min(1.0, gold_time / pred_time) if pred_time > 0 else 0.0
+            return {"ex": 1.0, "ves": ves, "valid": 1.0, "category": "ok_relaxed",
+                    "detail": f"表示等价（{how}）：列/拼接差异不影响结果一致性"}
         # top-N 并列：任一侧带 LIMIT 都去 LIMIT 比全序——gold 带 LIMIT 时并列边界
         # 不稳定；agent 带 LIMIT 时只是分页截断展示（如先 count 全量再分页取数）
         cand_dep = _depaginate(cand["sql"])
@@ -451,6 +622,11 @@ async def _score_one(conn, cache: dict, trace_id: str, case) -> dict:
                 if rows_match(pred2, gold2):
                     return {"ex": 1.0, "ves": min(1.0, gold_time / pred_time) if pred_time > 0 else 0.0,
                             "valid": 1.0, "category": "ok", "detail": "top-n tie（去 LIMIT 全序匹配）"}
+                hit2, how2 = rows_match_relaxed(pred2, gold2)
+                if hit2:
+                    return {"ex": 1.0, "ves": min(1.0, gold_time / pred_time) if pred_time > 0 else 0.0,
+                            "valid": 1.0, "category": "ok_relaxed",
+                            "detail": f"表示等价（{how2}）：去 LIMIT 全序匹配"}
             except Exception as exc:
                 last_err = str(exc)
     return {"ex": 0.0, "ves": 0.0, "valid": 1.0 if n_valid else 0.0,
@@ -500,9 +676,28 @@ def _table_leaf(t: str) -> str:
     return t.strip('"').split(".")[-1].lower()
 
 
-def _details(summary: str, body: str, indent: str = "") -> list[str]:
-    """Markdown 折叠块（think/回复等长文本用），body 按行缩进。"""
-    return [f"{indent}<details><summary>{summary}</summary>", "", body, "", f"{indent}</details>", ""]
+def _fence(text: str, lang: str = "") -> list[str]:
+    """用代码围栏包裹任意文本；内部反引号串更长时自动加长围栏，避免提前闭合。"""
+    body = str(text or "").rstrip("\n")
+    longest = max((len(m) for m in re.findall(r"`+", body)), default=0)
+    fence = "`" * max(3, longest + 1)
+    return [f"{fence}{lang}", body, fence]
+
+
+def _block(body: str, lang: str = "text") -> list[str]:
+    """长文本块：空行 + 顶格代码围栏。
+
+    不用 <details> 包裹：raw HTML 块内是否解析 Markdown 各渲染器行为不一致
+    （VS Code 会显示字面围栏，部分渲染器会把 LLM 输出里的 # 当报告标题）。
+    顶格围栏 + 空行分隔是纯 Markdown，任何渲染器表现一致。
+    """
+    return ["", *_fence(body, lang), ""]
+
+
+def _cell(text: str, limit: int = 90) -> str:
+    """表格单元格文本：压成单行、转义竖线、超长截断。"""
+    s = " ".join(str(text or "").split()).replace("|", "\\|")
+    return s[:limit] + ("…" if len(s) > limit else "")
 
 
 async def _render_case(conn: asyncpg.Connection, t: asyncpg.Record, ves, human: dict) -> str:
@@ -586,18 +781,18 @@ async def _render_case(conn: asyncpg.Connection, t: asyncpg.Record, ves, human: 
                 names = "、".join(str(c.get("name") or (c.get("function") or {}).get("name") or "?") for c in tcs)
                 lines.append(f"{step}. **Thought** {ok}（{ms}）→ 调用 {names}")
                 if content:
-                    lines += [f"   {x}" for x in _details("思考内容", content)]
+                    lines += _block(content)
             elif content:
                 title = "回答（最终）" if sp["span_id"] == final_sid else "中间回答"
                 lines.append(f"{step}. **{title}** {ok}（{ms}）")
-                lines += [f"   {x}" for x in _details("内容", content)]
+                lines += _block(content)
         elif sp["op_type"] == "tool" and sp["name"] == "execute_postgresql":
             sem = sem_by_span.get(sp["span_id"] or "") or {}
             rows = sem.get("rows")
             lines.append(f"{step}. **SQL 执行** {ok}（{rows if rows is not None else '?'} 行{'，' + ms if ms else ''}）")
             sql = sem.get("sql") or ""
             if sql:
-                lines += [f"   ```sql"] + [f"   {ln}" for ln in sql.splitlines()] + ["   ```", ""]
+                lines += _block(sql, "sql")
         else:
             meta = f"（{ms}）" if ms else ""
             lines.append(f"{step}. **{sp['op_type']}** {sp['name']} {ok}{meta}")
@@ -610,7 +805,7 @@ async def _render_case(conn: asyncpg.Connection, t: asyncpg.Record, ves, human: 
     gold_sql = t["gold_sql"]
     gnorm = _norm_sql(gold_sql)
     lines += ["**召回评估**", "", "- gold_sql：", ""]
-    lines += [f"  {x}" for x in _details("SQL", gold_sql)]
+    lines += _block(gold_sql, "sql")
     if not sqls:
         lines.append("- Agent SQL：无（no_sql）")
     else:
@@ -620,7 +815,7 @@ async def _render_case(conn: asyncpg.Connection, t: asyncpg.Record, ves, human: 
             hit = "✓" if _norm_sql(s["sql"]) == gnorm else "✗"
             meta = f"{'成功' if s['ok'] else '失败'}，{s['rows'] if s['rows'] is not None else '?'} 行"
             lines.append(f"  {i}. {hit}（{meta}）")
-            lines += [f"     {x}" for x in _details("SQL", s["sql"])]
+            lines += _block(s["sql"], "sql")
     gold_tables = sorted({_table_leaf(x) for x in _extract_tables(gold_sql)})
     missing = [x for x in gold_tables if x not in recalled]
     lines.append(f"- 结果命中（EX）：{t['ex']:.0%}")
@@ -640,8 +835,15 @@ async def _render_case(conn: asyncpg.Connection, t: asyncpg.Record, ves, human: 
     return "\n".join(lines)
 
 
+# 报告重点标签：只统计有区分度的数仓特征标签（通用语法类标签不计入统计）
+_KEY_OPS = {
+    "cte", "window_function", "correlated_subquery", "subquery", "union",
+    "grouping_set", "case_when", "having", "ratio_calc", "filter_null",
+}
+
+
 async def cmd_report(args) -> None:
-    """评测报告：汇总指标（EX/VES/Valid+失败归类+维度分组）+ 逐题渲染（链路/召回/人工位）。"""
+    """评测报告：汇总指标 + 题目概览 + 报告概览（难度/重点标签/逐题清单）+ 逐题渲染。"""
     conn = await meta_conn()
     try:
         since = _since(args.since)
@@ -665,33 +867,138 @@ async def cmd_report(args) -> None:
             SELECT count(DISTINCT trace_id) FROM telemetry.trace_scores
             WHERE name='EX' AND evaluator='eval_script' AND created_at > $1
             """, since)
-        cats = await conn.fetch(
+        # ── 报告概览：按 case 汇总（同一 case 多次重放只取最新一次 EX）──
+        case_rows = await conn.fetch(
             """
-            SELECT comment AS category, count(*) AS cnt FROM telemetry.trace_scores
-            WHERE name='EX' AND evaluator='eval_script' AND created_at > $1 AND value = 0
-            GROUP BY comment ORDER BY cnt DESC
-            """, since)
-        dims = await conn.fetch(
-            """
-            SELECT c.difficulty, c.ops, c.multi_hop, avg(s.value) AS ex, count(*) AS cnt
+            SELECT DISTINCT ON (s.case_id)
+                   s.case_id, s.trace_id, s.value AS ex, s.comment AS category,
+                   c.difficulty, c.ops, c.multi_hop
             FROM telemetry.trace_scores s
             JOIN telemetry.eval_cases c ON c.id = s.case_id
             WHERE s.name='EX' AND s.evaluator='eval_script' AND s.created_at > $1
-            GROUP BY c.difficulty, c.ops, c.multi_hop ORDER BY ex
+            ORDER BY s.case_id, s.created_at DESC
+            """, since)
+        detail_map = {
+            r["trace_id"]: r["comment"]
+            for r in await conn.fetch(
+                """
+                SELECT trace_id, comment FROM telemetry.trace_scores
+                WHERE name='detail' AND evaluator='eval_script' AND created_at > $1
+                """, since)
+        }
+
+        # ── 题目概览：评测覆盖的 eval_cases 统计 ──
+        cases_scored = await conn.fetch(
+            """
+            SELECT DISTINCT c.*, d.name AS dataset_name
+            FROM telemetry.eval_cases c
+            JOIN telemetry.eval_datasets d ON d.id = c.dataset_id
+            JOIN telemetry.trace_scores s ON s.case_id = c.id
+            WHERE s.name='EX' AND s.evaluator='eval_script' AND s.created_at > $1
             """, since)
 
+        # dataset / difficulty / grain / ops 分布
+        ds_counter: dict = {}
+        diff_counter: dict = {}
+        grain_counter: dict = {}
+        ops_counter: dict = {}
+
+        for c in cases_scored:
+            ds_name = c.get('dataset_name') or c.get('db_name') or '?'
+            ds_counter[ds_name] = ds_counter.get(ds_name, 0) + 1
+            diff_counter[c.get('difficulty') or '?'] = diff_counter.get(c.get('difficulty') or '?', 0) + 1
+            grain_counter[c.get('grain') or '?'] = grain_counter.get(c.get('grain') or '?', 0) + 1
+            # ops 是逗号分隔 text
+            for op in (c.get('ops') or '').split(','):
+                op = op.strip()
+                if op:
+                    ops_counter[op] = ops_counter.get(op, 0) + 1
+
+        # ops 统计 Top 10（按使用频次）
+        ops_sorted = sorted(ops_counter.items(), key=lambda x: -x[1])[:10]
+
+        # 报告概览：难度 / 重点标签的题数与 EX（每 case 一条）
+        diff_stat: dict[str, list] = {}
+        op_stat: dict[str, list] = {}
+        for r in case_rows:
+            score = r["ex"] or 0.0
+            diff_stat.setdefault(r["difficulty"] or "?", []).append(score)
+            for op in (r["ops"] or "").split(","):
+                op = op.strip()
+                if op in _KEY_OPS:
+                    op_stat.setdefault(op, []).append(score)
+
+        # ── 组装报告 ──
         lines = [
             "# 评测报告", "",
-            f"- 评测范围：{since} 之后，共 {n} 轮",
+            f"- 评测范围：{since.astimezone():%Y-%m-%d %H:%M:%S}（本机时间）之后",
+            f"- **评测题数**：{len(cases_scored)} 题（共 {n} 条 trace 记录）",
             f"- **EX**：{ex:.2%}" if ex is not None else "- EX：无数据",
             f"- **Valid SQL Rate**：{valid:.2%}" if valid is not None else "- Valid SQL Rate：无数据",
             f"- **VES**：{ves:.3f}" if ves is not None else "- VES：无数据",
-            "", "## 失败归类（EX=0）", "",
-            "| 归类 | 数量 |", "|---|---|",
+            "",
+            "## 题目概览", "",
+            "### 数据集", "",
+            "| dataset | 题数 |", "|---|---|",
         ]
-        lines += [f"| {c['category'] or '-'} | {c['cnt']} |" for c in cats] or ["| 无 | 0 |"]
-        lines += ["", "## 维度分组（EX）", "", "| difficulty | ops | multi_hop | EX | 数量 |", "|---|---|---|---|---|"]
-        lines += [f"| {d['difficulty']} | {d['ops']} | {d['multi_hop']} | {d['ex']:.2%} | {d['cnt']} |" for d in dims]
+        for ds, cnt in sorted(ds_counter.items(), key=lambda x: -x[1]):
+            lines.append(f"| {ds} | {cnt} |")
+
+        lines += ["", "### 难度分布", "", "| difficulty | 题数 |", "|---|---|"]
+        for diff in ('easy', 'medium', 'hard'):
+            cnt = diff_counter.get(diff, 0)
+            if cnt > 0:
+                lines.append(f"| {diff} | {cnt} |")
+        # 其他 difficulty 值
+        for diff, cnt in sorted(diff_counter.items(), key=lambda x: -x[1]):
+            if diff not in ('easy', 'medium', 'hard'):
+                lines.append(f"| {diff} | {cnt} |")
+
+        lines += ["", "### 结果粒度 (grain)", "", "| grain | 题数 |", "|---|---|"]
+        for g, cnt in sorted(grain_counter.items(), key=lambda x: -x[1]):
+            lines.append(f"| {g} | {cnt} |")
+
+        lines += ["", "### 操作标签 (ops Top 10)", "", "| op | 覆盖题数 |", "|---|---|"]
+        for op, cnt in ops_sorted:
+            lines.append(f"| `{op}` | {cnt} |")
+
+        # ── 报告概览：难度分布 / 重点标签 / 逐题清单 ──
+        def _stat_line(name: str, vals: list, with_label: bool) -> str:
+            passed = sum(1 for v in vals if v >= 0.5)
+            exv = sum(vals) / len(vals) if vals else 0.0
+            tag = f"`{name}`" if with_label else name
+            return f"| {tag} | {len(vals)} | {passed} | {exv:.2%} |"
+
+        lines += ["", "## 报告概览", "", "### 难度分布（EX）", "",
+                  "| 难度 | 题数 | 通过 | EX |", "|---|---|---|---|"]
+        for diff in ("easy", "medium", "hard"):
+            if diff in diff_stat:
+                lines.append(_stat_line(diff, diff_stat[diff], False))
+        for diff, vals in sorted(diff_stat.items()):
+            if diff not in ("easy", "medium", "hard"):
+                lines.append(_stat_line(diff, vals, False))
+
+        lines += ["", "### 重点标签（EX）", "",
+                  "| 标签 | 覆盖题数 | 通过 | EX |", "|---|---|---|---|"]
+        # 按 EX 升序（弱项优先），EX 相同按题数降序
+        for op, vals in sorted(op_stat.items(), key=lambda kv: (sum(kv[1]) / len(kv[1]), -len(kv[1]))):
+            lines.append(_stat_line(op, vals, True))
+        if not op_stat:
+            lines.append("| 无 | 0 | 0 | - |")
+
+        lines += ["", "### 题目结果清单", "",
+                  "| case | 难度 | 标签 | 结果 | 失败归因 |", "|---|---|---|---|---|"]
+        for r in case_rows:
+            score = r["ex"] or 0.0
+            if score >= 0.5:
+                mark = "✅（宽松）" if r["category"] == "ok_relaxed" else "✅"
+                reason = "-"
+            else:
+                mark = "❌"
+                reason = _cell(f"{r['category'] or '-'}：{detail_map.get(r['trace_id'], '')}")
+            lines.append(
+                f"| {r['case_id']} | {r['difficulty'] or '-'} | {_cell(r['ops'] or '-')} "
+                f"| {mark} | {reason} |")
         summary = "\n".join(lines)
 
         # 逐题段：所有已评分 trace（EX 分数存在即入报告），按 case id 排序
@@ -723,7 +1030,15 @@ async def cmd_report(args) -> None:
         per_case = "\n\n---\n\n".join(parts) if parts else "（无评测记录）"
         report = f"{summary}\n\n---\n\n# 逐题评估\n\n{per_case}\n"
 
-        out = Path(args.out)
+        # 文件名：用户显式 --out 则尊重，否则自动加时间戳，默认放 eval/report/ 子目录
+        if args.out:
+            out = Path(args.out)
+        else:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            report_dir = _REPO / "eval" / "report"
+            report_dir.mkdir(parents=True, exist_ok=True)
+            out = report_dir / f"report_{ts}.md"
+
         out.write_text(report, encoding="utf-8")
         print(summary)
         print(f"[OK] 报告已写 {out}（逐题 {len(parts)} 题）")
@@ -750,8 +1065,9 @@ def main() -> None:
     p.add_argument("--account", required=True)
     p.add_argument("--password", required=True)
     p.add_argument("--app-id", default="main")
-    p.add_argument("--ids", default="", help="只重放指定 case id，如 1,2,3")
-    p.add_argument("--limit", type=int, default=100)
+    p.add_argument("--ids", default="", help="只重放指定 case id，如 35,37（不填则重放全部 verified）")
+    p.add_argument("--dataset", default="", help="按 dataset 名过滤，如 dvdrental 或 dvdrental,tpcds_sf1")
+    p.add_argument("--limit", type=int, default=500, help="最多重放多少题（默认 500，覆盖完整题集）")
     p.add_argument("--all", action="store_true", help="含 draft 题目（默认只重放 verified）")
     p.add_argument("--timeout", type=int, default=300, help="单题 SSE 读取超时秒")
     p.add_argument("--interval", type=float, default=1.0, help="题间间隔秒")
@@ -764,7 +1080,7 @@ def main() -> None:
 
     p = sub.add_parser("report", help="聚合输出 Markdown 报告")
     p.add_argument("--since", default="", help="聚合该 ISO 时刻之后")
-    p.add_argument("--out", default=str(_REPO / "eval" / "report.md"))
+    p.add_argument("--out", default="", help="输出路径（默认 eval/report_YYYYMMDD_HHMMSS.md）")
     p.set_defaults(func=cmd_report)
 
     args = parser.parse_args()

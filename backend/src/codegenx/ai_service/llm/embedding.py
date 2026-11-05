@@ -39,10 +39,15 @@ class EmbeddingClient:
             api_key = get_settings().ai_api_key
             api_base = api_base if provider.api_base else get_settings().ai_base_url
 
+        # 显式禁用代理（避免继承 Windows 系统代理导致 Connection error）
+        http_client = httpx.AsyncClient(
+            proxy=None, trust_env=False,
+            timeout=httpx.Timeout(float(emb.api_timeout_seconds), connect=15.0),
+        )
         self.client = AsyncOpenAI(
             api_key=api_key,
             base_url=api_base.rstrip("/"),
-            timeout=httpx.Timeout(float(emb.api_timeout_seconds), connect=15.0),
+            http_client=http_client,
         )
 
     async def embed_texts(self, texts: list[str]) -> list[list[float]]:

@@ -41,13 +41,17 @@ def get_openai_client(provider_name: str, provider_config: ProviderConfig) -> As
             f"请在 config.json 的 providers.{key}.apiKey 补齐后重启"
         )
 
+    # 显式禁用代理（httpx 默认继承 Windows 系统代理，如 Clash 127.0.0.1:7897，
+    # 代理未启动时会导致所有 LLM/embedding 请求 Connection error）
+    http_client = httpx.AsyncClient(
+        proxy=None, trust_env=False,
+        timeout=httpx.Timeout(600.0, read=300.0, write=30.0, connect=20.0, pool=10.0),
+    )
     client = AsyncOpenAI(
         api_key=provider_config.api_key.strip(),
         base_url=(provider_config.api_base or "").strip() or None,
         default_headers=provider_config.extra_headers or None,
-        # connect 放宽到 20s（实测冷启动 DNS 解析 ~11s，10s 会在 DNS 阶段直接超时）；
-        # read 放宽到 300s，兼容长思考模型在两个 chunk 之间的长间隔
-        timeout=httpx.Timeout(600.0, read=300.0, write=30.0, connect=20.0, pool=10.0),
+        http_client=http_client,
         max_retries=0,
     )
     _clients[key] = client
