@@ -36,7 +36,7 @@ from codegenx.ai_service.llm.async_client import get_llm
 from codegenx.ai_service.llm.errors import classify_llm_error
 from codegenx.ai_service.llm.resilience import get_breaker, resilient_invoke
 from codegenx.ai_service.utils.context_utils import rough_tokens
-from codegenx.ai_service.utils.config import config
+from codegenx.ai_service.utils.config import config, split_model_chain
 
 # 单次摘要提取最多喂入的消息条数（水位增量超限时从最老开始截断，剩余下轮补摘）
 MAX_EXTRACT_MESSAGES = config.compact.summary_extract_max_messages or 200
@@ -132,9 +132,10 @@ class SessionSummaryService(BaseComponent):
 
     def __init__(self, system_app=None) -> None:
         BaseComponent.__init__(self, system_app)
-        # 初始化即解析摘要模型（压缩族共用 compact.model_name，空则默认模型）
-        model = (config.compact.model_name or "").strip() or config.get_default_model()
-        self._model_chain: list[str] = [model]
+        # 初始化即解析摘要模型链（压缩族共用 compact.model_name，逗号分隔，空则默认模型）
+        self._model_chain: list[str] = split_model_chain(
+            config.compact.model_name, config.get_default_model(),
+        )
 
     def init_app(self, system_app) -> None:
         self.system_app = system_app

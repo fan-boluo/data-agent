@@ -265,6 +265,8 @@ async def start_app(app: SystemApp | None = None) -> SystemApp:
     if app._started:
         return app
     await app.async_before_start()
+    # 启动收尾：全部组件预热完成后广播（组件在此汇总依赖全体就绪的观测，如熔断器快照）
+    await app.async_after_start()
     app._started = True
     log.info("SystemApp startup completed")
     return app

@@ -112,6 +112,7 @@ async def search_by_vector(
     payload 不含正文，调用方（retriever）按 id 回 MySQL。
     """
     client = get_qdrant_client_manager().client
+    print(f"[QDRANT] client → {client._url}")
     try:
         hits = await asyncio.to_thread(
             client.query_points,

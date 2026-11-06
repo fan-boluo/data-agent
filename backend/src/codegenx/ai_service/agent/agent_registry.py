@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -50,8 +51,26 @@ class AgentRegistry(BaseComponent):
     # ------------------------------------------------------------------ lifecycle
 
     async def async_before_start(self) -> None:
-        """启动校验（当前暂无额外校验，预留扩展点）。"""
-        pass
+        """启动预热：按各智能体配置的模型链预建客户端与熔断器（构造即注册，不发网络请求）。
+
+        agent 实例是按请求创建的，无法靠 __init__ 完成启动预热；此处遍历已注册
+        规格的类属性 agent_config，保证启动后 metrics/日志即含各 agent 的熔断器。
+        预热失败不阻断启动（离线/未配 key 时允许带病启动，首个真实调用再暴露）。
+        """
+        from codegenx.ai_service.llm.async_client import get_llm
+        from codegenx.ai_service.llm.resilience import get_breaker
+
+        for spec in self._specs.values():
+            cfg = getattr(spec.cls, "agent_config", None) if spec.cls else None
+            chain = list(getattr(cfg, "resolved_model_name_chain", None) or [])
+            for model in chain:
+                model = str(model or "").strip()
+                if not model:
+                    continue
+                with suppress(Exception):
+                    get_llm(model)
+                    get_breaker(model)
+                    log.info("[agent] 智能体模型已预热: {} -> {}", spec.name, model)
 
     # ------------------------------------------------------------------ 注册
 

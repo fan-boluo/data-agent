@@ -23,6 +23,19 @@ class AgentMemoryPolicy(Base):
     write_types: List[str] | None = None  # 允许提炼成的记忆类型；None=不限
 
 
+def split_model_chain(model_name: str | None, default: str = "") -> list[str]:
+    """逗号分隔模型链 → 模型列表（剔除空项；空配置回落 default）。
+
+    组件（agent / compact / summary / memory）统一用本函数解析 model_name，
+    避免「整串逗号名被当成单个模型名」导致预热与调用全部落空。
+    """
+    raw = str(model_name or "").strip()
+    if not raw:
+        return [default] if default else []
+    chain = [m.strip() for m in raw.split(",") if m.strip()]
+    return chain or ([default] if default else [])
+
+
 class AgentConfig(Base):
     id: str = ""
     role:str = ""
@@ -72,13 +85,12 @@ class AgentConfig(Base):
 
     @property
     def resolved_model_name(self) -> str:
-        model_name = str(self.model_name or "").strip()
-        return model_name.split(",")[0] if "," in model_name else model_name
+        chain = self.resolved_model_name_chain
+        return chain[0] if chain else ""
 
     @property
     def resolved_model_name_chain(self) -> list[str]:
-        model_name = str(self.model_name or "").strip()
-        return model_name.split(",") if "," in model_name else [model_name]
+        return split_model_chain(self.model_name)
 
 
 class ProviderConfig(Base):

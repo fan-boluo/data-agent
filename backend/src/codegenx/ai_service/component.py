@@ -3,10 +3,11 @@
 分层原则与判别法见 docs/SystemApp架构设计.md §2。本模块是纯框架层：
 不 import 任何业务组件（组合根在 system_app.py，组件实现各自模块内）。
 
-生命周期钩子执行约定（SystemApp 广播，仅 3 个钩子）：
-- 启动方向（on_init → async_before_start）：按组件**注册顺序**串行执行——
+生命周期钩子执行约定（SystemApp 广播，仅 4 个钩子）：
+- 启动方向（on_init → async_before_start → async_after_start）：按组件**注册顺序**串行执行——
   注册顺序即依赖顺序（如 ToolRegistry 必须先于 AgentRegistry 装载）。
-  on_init 在 init_app() 同步阶段广播；async_before_start 在 start_app() 事件循环内广播（主启动钩子）。
+  on_init 在 init_app() 同步阶段广播；async_before_start 在 start_app() 事件循环内广播（主启动钩子）；
+  async_after_start 在全部组件的 async_before_start 完成后广播（依赖全体就绪的收尾动作，如观测汇总）。
 - 关闭方向（async_before_stop）：在 stop_app() 内按注册**逆序**执行，
   异常逐组件隔离并记录，保证全部组件都有机会收尾。
 """
@@ -22,13 +23,16 @@ from shared import log
 
 
 class LifeCycle:
-    """组件生命周期钩子定义（仅 3 个；重写需要的即可，其余空实现）。"""
+    """组件生命周期钩子定义（仅 4 个；重写需要的即可，其余空实现）。"""
 
     def on_init(self):
         """组件初始化（init_app() 同步阶段广播；轻量装配/同步装载如目录扫描）。"""
 
     async def async_before_start(self):
         """启动主钩子（start_app() 事件循环内广播：连接池/后台任务/预热）。"""
+
+    async def async_after_start(self):
+        """启动收尾钩子（全部组件 async_before_start 完成后广播：依赖全体就绪的观测/校验）。"""
 
     async def async_before_stop(self):
         """关闭主钩子（stop_app() 逆序广播：后台任务/连接池释放）。"""
@@ -164,6 +168,11 @@ class SystemApp(LifeCycle):
         """按注册顺序 await 全部组件的 async_before_start（启动主钩子）。"""
         for component in list(self.components.values()):
             await component.async_before_start()
+
+    async def async_after_start(self):
+        """按注册顺序 await 全部组件的 async_after_start（全部预热完成后的收尾钩子）。"""
+        for component in list(self.components.values()):
+            await component.async_after_start()
 
     # ------------------------------------------------------------ 生命周期广播（关闭：注册逆序）
 

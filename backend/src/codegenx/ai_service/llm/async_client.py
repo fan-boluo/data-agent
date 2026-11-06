@@ -151,7 +151,10 @@ class AsyncLLMClient:
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
-            "stream": True
+            "stream": True,
+            # 流式必须显式要求末尾 chunk 回传 usage，否则 provider 返回 None，
+            # 导致 llm span 的 token 恒为 0（成本/延迟统计失去数据源）
+            "stream_options": {"include_usage": True},
         }
         if tools:
             # Drop empty tools list or None to avoid OpenAI validation errors

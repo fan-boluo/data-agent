@@ -32,7 +32,7 @@ from codegenx.ai_service.llm.errors import classify_llm_error
 from codegenx.ai_service.llm.resilience import get_breaker, resilient_invoke
 from codegenx.ai_service.llm.async_client import get_llm
 from codegenx.ai_service.component import BaseComponent, ComponentType
-from codegenx.ai_service.utils.config import config
+from codegenx.ai_service.utils.config import config, split_model_chain
 from codegenx.ai_service.compact.thresholds import (
     estimate_tokens,
     MAX_OUTPUT_TOKENS_FOR_SUMMARY,
@@ -324,9 +324,10 @@ class CompactionService(BaseComponent):
 
     def __init__(self, system_app=None) -> None:
         BaseComponent.__init__(self, system_app)
-        # 初始化即解析压缩模型（compact.model_name，空则默认模型）
-        model = (config.compact.model_name or "").strip() or config.get_default_model()
-        self._model_chain: list[str] = [model]
+        # 初始化即解析压缩模型链（compact.model_name 逗号分隔，空则回落默认模型）
+        self._model_chain: list[str] = split_model_chain(
+            config.compact.model_name, config.get_default_model(),
+        )
         # system 日志缓存（按 agent）：全量只打一次，之后分区内容变化才打印对应分区
         self._prompt_logged: set[str] = set()
         self._section_log_cache: dict[str, dict[str, str]] = {}

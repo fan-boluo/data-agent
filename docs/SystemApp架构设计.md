@@ -52,12 +52,13 @@
 
 ### 生命周期钩子
 
-组件按需实现三个钩子（不写即空）：
+组件按需实现四个钩子（不写即空）：
 
 | 钩子 | 方向 | 广播入口 | 顺序 | 典型用途 |
 |---|---|---|---|---|
 | `on_init` | 启动（同步） | init_app() | 注册序 | 轻量装配（如 skill 加载） |
 | `async_before_start` | 启动（异步，**主钩子**） | start_app() | 注册序 | 连接建立 / 后台任务启动 / 预热 |
+| `async_after_start` | 启动（异步，**收尾钩子**） | start_app()（全部 before_start 完成后） | 注册序 | 依赖全体就绪的观测/校验（如熔断器状态汇总） |
 | `async_before_stop` | 关闭（异步，**主钩子**） | stop_app() | **注册逆序** | 后台任务停止 / 连接释放 |
 
 关闭异常隔离：单组件 `async_before_stop` 抛错只记日志，其余组件照常收尾——保证全部组件都有机会执行清理。
@@ -93,7 +94,8 @@ main.py lifespan（FastAPI 入口）
 │   │   └─ _app.on_init()   广播同步钩子
 │   │
 │   └─ await start_app()    异步启动
-│       └─ _app.async_before_start()  广播异步钩子（LLM 预热 / SessionPool cleanup loop / 记忆调度器启动）
+│       ├─ _app.async_before_start()  广播异步钩子（LLM 预热 / SessionPool cleanup loop / 记忆调度器启动）
+│       └─ _app.async_after_start()   广播收尾钩子（全部预热完成后：熔断器状态快照等观测汇总）
 │
 └─ shutdown：await stop_app()
     ├─ _app.async_before_stop()  注册逆序广播
@@ -149,29 +151,46 @@ get_app().memory.warm_extract(query)
 
 ---
 
-## 文件地图
+## system_app 的运行方式
+
+### 两层分工
+
+| 文件 | 角色 | 只负责 |
+|---|---|---|
+| `component.py` | 纯框架层 | 4 个生命周期钩子的定义、`ComponentType` 枚举、`BaseComponent`（注册/查表）、`SystemApp`（组件注册表 + 生命周期广播）；**不 import 任何业务组件** |
+| `system_app.py` | 组合根 | 决定注册哪些组件及顺序、提供类型化访问器、持有全局单例并对外暴露 `init_app / start_app / stop_app / reset_app` |
+
+### 一次进程的完整时序
 
 ```
-backend/src/codegenx/ai_service/
-├── component.py            # 框架层（无业务 import）：LifeCycle / ComponentType / BaseComponent / SystemApp(注册表+广播)
-├── system_app.py           # 组合根：SystemApp(具体容器 + 16 个类型化访问器)
-│                           #         initialize_components / init_app / start_app / stop_app / get_app
-├── agent/
-│   ├── agent_instances.py  # initialize_agent_instances：leader / planner / data_explore / csv_explore 规格注册
-│   ├── tool_handler.py     # ToolRegistry（启动扫描 + child_view）
-│   ├── tool_executor.py    # ToolExecutor
-│   └── agent_registry.py   # AgentRegistry + AgentSpec
-├── session/session_pool.py # SessionPool
-├── chat_message/
-│   ├── persist.py          # SessionPersistence
-│   └── store.py            # ChatMessageStore
-├── task/task_manager.py    # TaskBoardService
-├── memory/memory_manager.py # MemoryFacade
-├── llm/facade.py           # LLMFacade
-├── bus/queue.py            # MessageBus
-├── services/chat_service.py # ChatService（请求入口）
-├── compact/                # SessionSummaryService + CompactionService
-├── trace/                  # MonitorMaintenanceService + recorder（直调，不挂 hook）
-├── schedule/memory.py      # MemoryScheduler
-└── hook/                   # HookManager（监听器随各功能模块 @on 注册，末尾 load_and_freeze）
+装配（同步 init_app）
+  ├─ 创建/复用全局单例 _app
+  ├─ initialize_components(app)：按依赖顺序登记组件
+  │    （每个 initialize_xxx 内部延迟 import 实现类，构造即注册）
+  └─ on_init()：按注册顺序广播同步钩子（轻量装配）
+
+启动（异步 start_app）
+  ├─ async_before_start()：按注册顺序广播（建连接 / 拉后台任务 / 预热模型）
+  ├─ async_after_start()：再按注册顺序广播一次
+  │    （此时全部组件预热完毕，只做依赖全体就绪的收尾观测）
+  └─ 置 _started（重复调用直接返回，防重复拉起后台任务）
+
+运行
+  └─ 业务经 get_app().xxx 取组件：访问器内部惰性 import + 按 ComponentType 查表，
+     取不到即抛错（fail fast）；组件之间横向访问同样走访问器，不模块级互相 import
+
+关闭（异步 stop_app）
+  ├─ async_before_stop()：按注册逆序广播，单组件异常只记日志、其余照常收尾
+  └─ 基础设施单例（redis / qdrant / mysql / postgres）由容器统一 suppress 兜底释放
 ```
+
+### 关键约束
+
+- **顺序即依赖**：启动方向按注册顺序串行，关闭方向逆序；注册清单的排列本身就是依赖声明。
+- **两段式启动**：`on_init` 只放同步轻量动作；任何需要事件循环的动作（连接、后台任务、预热）必须放 `async_before_start`；
+  需要"等所有组件都预热完"的全局观测放 `async_after_start`。
+- **失败语义**：启动钩子不隔离异常（配置/依赖错误应阻断启动）；只有关闭钩子逐组件隔离。
+- **幂等**：`_components_ready` 防重复注册，`_started` 防重复启动与重复收尾。
+- **扩展方式**：新增组件 = 实现 `BaseComponent` + 在 `ComponentType` 加枚举 + 在 `initialize_components` 注册清单加一行
+  + （需要跨组件使用时）加一个类型化访问器。本节只描述机制，不随组件增减而改动。
+

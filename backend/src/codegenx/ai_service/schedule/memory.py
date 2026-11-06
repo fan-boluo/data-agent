@@ -34,7 +34,7 @@ from datetime import datetime
 
 from shared import log
 
-from codegenx.ai_service.utils.config import config
+from codegenx.ai_service.utils.config import config, split_model_chain
 from codegenx.ai_service.llm.async_client import get_llm
 from codegenx.ai_service.llm.errors import classify_llm_error
 from codegenx.ai_service.llm.resilience import get_breaker, resilient_invoke
@@ -96,10 +96,10 @@ class MemoryScheduler(BaseComponent):
         self._batch_size = batch_size
         # 离线 LLM 并发上限：避免挤占在线对话资源
         self._sem = asyncio.Semaphore(config.memory.store.extract_max_concurrency or 2)
-        # 初始化即解析提炼模型（memory.store.model_name 最高优先级，空则默认模型）
-        self._model_chain: list[str] = [
-            (config.memory.store.model_name or "").strip() or config.get_default_model()
-        ]
+        # 初始化即解析提炼模型链（memory.store.model_name 逗号分隔，最高优先级，空则默认模型）
+        self._model_chain: list[str] = split_model_chain(
+            config.memory.store.model_name, config.get_default_model(),
+        )
         self._stop = asyncio.Event()
         self._loop_task: asyncio.Task | None = None
         # 周期作业上次执行时刻

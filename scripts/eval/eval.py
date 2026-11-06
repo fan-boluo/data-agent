@@ -700,6 +700,35 @@ def _cell(text: str, limit: int = 90) -> str:
     return s[:limit] + ("…" if len(s) > limit else "")
 
 
+def _pct(values: list[float], p: float) -> float:
+    """分位数（最近秩），空列表返回 0。"""
+    if not values:
+        return 0.0
+    s = sorted(values)
+    return s[min(len(s) - 1, max(0, int(round((len(s) - 1) * p))))]
+
+
+def _sec(ms: float) -> str:
+    """毫秒 → 秒（1 位小数）；未知耗时显示 -。"""
+    return f"{ms / 1000:.1f}s" if ms else "-"
+
+
+def _num(v: float) -> str:
+    """整数千分位；0 视为未采集。"""
+    return f"{v:,.0f}" if v else "-"
+
+
+def _json_obj(v) -> dict:
+    """JSONB 字段 → dict；兼容空值、"null" 字符串与脏数据。"""
+    if isinstance(v, dict):
+        return v
+    try:
+        obj = json.loads(v or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return obj if isinstance(obj, dict) else {}
+
+
 async def _render_case(conn: asyncpg.Connection, t: asyncpg.Record, ves, human: dict) -> str:
     """单题渲染：头部指标 → 执行链路（think/tool 序列）→ 召回评估 → 分析/回复人工位。
 
@@ -721,8 +750,8 @@ async def _render_case(conn: asyncpg.Connection, t: asyncpg.Record, ves, human: 
     sqls: list[dict] = []
     recalled: list[str] = []
     for r in sems:
-        args = r["tool_args"] if isinstance(r["tool_args"], dict) else json.loads(r["tool_args"] or "{}")
-        res = r["tool_result"] if isinstance(r["tool_result"], dict) else json.loads(r["tool_result"] or "{}")
+        args = _json_obj(r["tool_args"])
+        res = _json_obj(r["tool_result"])
         if r["tool_name"] == "execute_postgresql":
             sql = str(args.get("sql") or "").strip()
             if sql:
@@ -745,6 +774,14 @@ async def _render_case(conn: asyncpg.Connection, t: asyncpg.Record, ves, human: 
         f"### Case {t['case_id']}：{t['question']}",
         "",
         f"- 标签：{t['difficulty'] or '-'} / {t['ops'] or '-'} / {'多跳' if t['multi_hop'] else '单跳'}",
+    ]
+    # 效率指标：耗时 / tokens（token 未采集时只出耗时）
+    pt, ct = int(t["prompt_tokens"] or 0), int(t["completion_tokens"] or 0)
+    eff = f"- 耗时：{_sec(float(t['duration_ms'] or 0))}"
+    if pt or ct:
+        eff += f" ｜ tokens：{_num(pt)} / {_num(ct)}"
+    lines += [
+        eff,
         f"- EX：{t['ex']:.0%}（{t['category'] or '-'}）｜ VES：{f'{ves:.3f}' if ves is not None else '-'}"
         f" ｜ 状态：{t['status']} ｜ trace：`{tid}`",
         "",
@@ -756,7 +793,7 @@ async def _render_case(conn: asyncpg.Connection, t: asyncpg.Record, ves, human: 
     for sp in reversed(spans):
         if sp["op_type"] != "llm":
             continue
-        out = sp["output"] if isinstance(sp["output"], dict) else json.loads(sp["output"] or "{}")
+        out = _json_obj(sp["output"])
         if out.get("tool_calls"):
             continue
         if str(out.get("content") or "").strip():
@@ -771,7 +808,7 @@ async def _render_case(conn: asyncpg.Connection, t: asyncpg.Record, ves, human: 
             cur_agent = sp["agent"]
             lines += [f"> agent → {cur_agent}", ""]
         step += 1
-        out = sp["output"] if isinstance(sp["output"], dict) else json.loads(sp["output"] or "{}")
+        out = _json_obj(sp["output"])
         ms = f"{sp['duration_ms']:.0f}ms" if sp["duration_ms"] is not None else ""
         ok = "✓" if sp["status"] == "ok" else "✗"
         if sp["op_type"] == "llm":
@@ -928,6 +965,62 @@ async def cmd_report(args) -> None:
                 if op in _KEY_OPS:
                     op_stat.setdefault(op, []).append(score)
 
+        # ── 成本与效率：按 case 最新 trace 聚合（口径与 EX 一致，一题一条）──
+        trace_ids = [r["trace_id"] for r in case_rows if r["trace_id"]]
+        perf_raw: dict[str, dict] = {}
+        if trace_ids:
+            for r in await conn.fetch(
+                """
+                SELECT t.trace_id, t.duration_ms, t.model,
+                       t.prompt_tokens, t.completion_tokens,
+                       COALESCE((t.tags->>'tool_calls')::int, 0) AS tool_calls
+                FROM telemetry.traces t WHERE t.trace_id = ANY($1)
+                """, trace_ids):
+                perf_raw[r["trace_id"]] = dict(r)
+            # llm 调用次数只在 spans 里，traces 无对应列
+            for r in await conn.fetch(
+                """
+                SELECT trace_id, count(*) AS llm_calls FROM telemetry.trace_spans
+                WHERE trace_id = ANY($1) AND op_type='llm' GROUP BY trace_id
+                """, trace_ids):
+                perf_raw.setdefault(r["trace_id"], {})["llm_calls"] = r["llm_calls"]
+
+        def _perf_of(tid: str) -> dict:
+            p = perf_raw.get(tid) or {}
+            pt = int(p.get("prompt_tokens") or 0)
+            ct = int(p.get("completion_tokens") or 0)
+            return {
+                "dur": float(p["duration_ms"]) if p.get("duration_ms") else 0.0,
+                "pt": pt, "ct": ct, "tokens": pt + ct,
+                "tool": int(p.get("tool_calls") or 0),
+                "llm": int(p.get("llm_calls") or 0),
+            }
+
+        perf_all = [_perf_of(r["trace_id"]) for r in case_rows]
+        perf_pass = [_perf_of(r["trace_id"]) for r in case_rows if (r["ex"] or 0) >= 0.5]
+        perf_fail = [_perf_of(r["trace_id"]) for r in case_rows if (r["ex"] or 0) < 0.5]
+        # token 覆盖不足时（历史 trace 无 usage）不出均值/金额，避免报告出现失真成本
+        token_cov = sum(1 for p in perf_all if p["tokens"] > 0)
+        has_token = bool(perf_all) and token_cov == len(perf_all)
+
+        def _agg(rows: list[dict]) -> dict:
+            n = len(rows)
+            if not n:
+                return {}
+            durs = [p["dur"] for p in rows if p["dur"] > 0]
+            return {
+                "n": n,
+                "dur_avg": sum(durs) / len(durs) if durs else 0.0,
+                "tool_avg": sum(p["tool"] for p in rows) / n,
+                "llm_avg": sum(p["llm"] for p in rows) / n,
+                "pt_avg": sum(p["pt"] for p in rows) / n,
+                "ct_avg": sum(p["ct"] for p in rows) / n,
+                "token_avg": sum(p["tokens"] for p in rows) / n,
+                "pt_sum": sum(p["pt"] for p in rows),
+                "ct_sum": sum(p["ct"] for p in rows),
+                "durs": durs,
+            }
+
         # ── 组装报告 ──
         lines = [
             "# 评测报告", "",
@@ -937,7 +1030,36 @@ async def cmd_report(args) -> None:
             f"- **Valid SQL Rate**：{valid:.2%}" if valid is not None else "- Valid SQL Rate：无数据",
             f"- **VES**：{ves:.3f}" if ves is not None else "- VES：无数据",
             "",
-            "## 题目概览", "",
+        ]
+
+        # ── 成本与效率：单题均值 + 通过/失败对比（失败题更贵是迭代优先级的依据）──
+        ov = _agg(perf_all)
+        if ov:
+            lines += ["## 成本与效率", "", "| 指标 | 值 |", "|---|---|",
+                      f"| 平均单题耗时 | {_sec(ov['dur_avg'])} |",
+                      f"| 耗时 P50 / P95 | {_sec(_pct(ov['durs'], 0.5))} / {_sec(_pct(ov['durs'], 0.95))} |",
+                      f"| 平均 LLM 调用 | {ov['llm_avg']:.1f} 次 |",
+                      f"| 平均工具调用 | {ov['tool_avg']:.1f} 次 |"]
+            if has_token:
+                lines += [f"| 平均单题 tokens（prompt / completion） | {_num(ov['pt_avg'])} / {_num(ov['ct_avg'])} |",
+                          f"| 评测总 tokens（prompt / completion） | {_num(ov['pt_sum'])} / {_num(ov['ct_sum'])} |"]
+            else:
+                lines.append(f"| tokens | 未完整采集（{token_cov}/{len(perf_all)} 题有 usage，"
+                             f"重放后补齐） |")
+            lines += ["", "### 通过 vs 失败（效率对比）", "",
+                      "| 分组 | 题数 | 平均耗时 | 平均 LLM 调用 | 平均工具调用 | 平均 tokens |",
+                      "|---|---|---|---|---|---|"]
+            for label, group in (("通过", perf_pass), ("失败", perf_fail)):
+                a = _agg(group)
+                if not a:
+                    continue
+                tokens = _num(a['token_avg']) if has_token else "-"
+                lines.append(
+                    f"| {label} | {a['n']} | {_sec(a['dur_avg'])} | {a['llm_avg']:.1f} "
+                    f"| {a['tool_avg']:.1f} | {tokens} |")
+            lines.append("")
+
+        lines += ["## 题目概览", "",
             "### 数据集", "",
             "| dataset | 题数 |", "|---|---|",
         ]
@@ -1004,7 +1126,8 @@ async def cmd_report(args) -> None:
         # 逐题段：所有已评分 trace（EX 分数存在即入报告），按 case id 排序
         rows = await conn.fetch(
             """
-            SELECT t.trace_id, t.status,
+            SELECT t.trace_id, t.status, t.duration_ms,
+                   t.prompt_tokens, t.completion_tokens,
                    s.value AS ex, s.comment AS category, s.case_id,
                    c.question, c.gold_sql, c.difficulty, c.ops, c.multi_hop
             FROM telemetry.traces t

@@ -169,6 +169,11 @@ class CircuitBreaker:
     def state(self) -> str:
         return self._state
 
+    @property
+    def state_code(self) -> int:
+        """状态对应的指标数值（0=closed 1=half_open 2=open）。"""
+        return self._STATE_CODE[self._state]
+
     async def acquire(self) -> bool:
         """请求进入前调用。False = 快速失败，调用方应立即走 fallback。"""
         async with self._lock:
@@ -195,15 +200,26 @@ class CircuitBreaker:
             elif self._state == "closed":
                 self._consecutive_failures = 0
 
-    async def record_failure(self) -> None:
+    async def record_failure(self, count_as_failure: bool = True) -> None:
+        """记录失败；half_open 下任何失败都收敛为 open（归还探测名额）。
+
+        count_as_failure=False 用于 FATAL/OVERFLOW/LOGIC：闭态不累计连续失败，
+        但半开探测必须收敛，否则探测名额耗尽后熔断器会永久卡在 half_open。
+        """
         async with self._lock:
             if self._state == "half_open":
                 self._half_total += 1
                 self._enter("open")  # 探测失败，重新打开
-            elif self._state == "closed":
+            elif self._state == "closed" and count_as_failure:
                 self._consecutive_failures += 1
                 if self._consecutive_failures >= self._failure_threshold:
                     self._enter("open")
+
+    async def release(self) -> None:
+        """归还半开探测名额（请求被取消等无结果场景），不改变熔断状态。"""
+        async with self._lock:
+            if self._state == "half_open":
+                self._half_calls = max(0, self._half_calls - 1)
 
     def _enter(self, state: str) -> None:
         self._state = state
@@ -214,6 +230,8 @@ class CircuitBreaker:
             _inc("llm_breaker_opens_total", circuit=self.key)
         elif state == "closed":
             log.info("[llm_breaker] {} CLOSED（探测恢复）", self.key)
+        elif state == "half_open":
+            log.info("[llm_breaker] {} HALF_OPEN（冷却结束，放行探测）", self.key)
         self._half_calls = self._half_success = self._half_total = 0
         _set_gauge("llm_circuit_state", self._STATE_CODE[state], circuit=self.key)
 
@@ -236,12 +254,32 @@ def get_breaker(model_name: str) -> CircuitBreaker:
             half_open_success_rate=cfg.breaker_half_open_success_rate,
         )
         _breakers[key] = breaker
+        # 新建即上报初始状态：预热阶段 metrics 就能看到全部熔断器（而非等首次状态迁移）
+        _set_gauge("llm_circuit_state", breaker.state_code, circuit=key)
+        log.info("[llm_breaker] {} 已创建 state={}", key, breaker.state)
     return breaker
 
 
 def circuit_snapshot() -> Dict[str, str]:
     """全部熔断器状态快照（管理/排障用）。"""
     return {k: b.state for k, b in _breakers.items()}
+
+
+def log_breaker_snapshot(prefix: str = "") -> Dict[str, str]:
+    """打印全部熔断器当前状态：一行聚合 + 逐条明细（启动完成/排障用）。"""
+    snapshot = circuit_snapshot()
+    head = f"[llm_breaker] {prefix}".rstrip()
+    if not snapshot:
+        log.info("{} 无已注册熔断器", head)
+        return snapshot
+    counts: Dict[str, int] = {}
+    for state in snapshot.values():
+        counts[state] = counts.get(state, 0) + 1
+    brief = " / ".join(f"{s}×{n}" for s, n in sorted(counts.items()))
+    log.info("{} 共 {} 个熔断器: {}", head, len(snapshot), brief)
+    for key, state in snapshot.items():
+        log.info("{} | {} = {}", head, key, state)
+    return snapshot
 
 
 # ── 内部工具 ───────────────────────────────────────────────────────────────
@@ -348,6 +386,7 @@ async def resilient_invoke(
                 _log_call(label, model, attempt, time.monotonic() - t0, "ok", fallback_used)
                 return llm_response
             except asyncio.CancelledError:
+                await breaker.release()  # 取消：归还半开探测名额
                 raise  # 停止请求/任务取消：绝不重试
             except Exception as exc:
                 cls = classify_llm_error(exc)
@@ -355,8 +394,8 @@ async def resilient_invoke(
                 _log_call(label, model, attempt, time.monotonic() - t0,
                           f"error_{cls.value}", fallback_used)
                 last_exc = exc
-                if cls is LLMErrorClass.RETRYABLE:
-                    await breaker.record_failure()  # 只有上游健康类失败才计熔断
+                # 半开探测无论错误类型都要收敛；闭态只有上游健康类失败才计熔断
+                await breaker.record_failure(count_as_failure=(cls is LLMErrorClass.RETRYABLE))
                 if cls is LLMErrorClass.LOGIC:
                     raise  # 本地 bug：立即暴露
                 if cls is not LLMErrorClass.RETRYABLE:
@@ -448,6 +487,7 @@ async def resilient_invoke_stream(
                 _log_call(label, model, attempt, time.monotonic() - t0, "ok", fallback_used)
                 return
             except asyncio.CancelledError:
+                await breaker.release()  # 取消：归还半开探测名额
                 raise  # 用户停止/客户端断开：绝不重试、不计失败
             except Exception as exc:
                 cls = classify_llm_error(exc)
@@ -455,8 +495,8 @@ async def resilient_invoke_stream(
                 _log_call(label, model, attempt, time.monotonic() - t0,
                           f"error_{cls.value}", fallback_used)
                 last_exc = exc
-                if cls is LLMErrorClass.RETRYABLE:
-                    await breaker.record_failure()
+                # 半开探测无论错误类型都要收敛；闭态只有上游健康类失败才计熔断
+                await breaker.record_failure(count_as_failure=(cls is LLMErrorClass.RETRYABLE))
                 if first_chunk_seen:
                     # 首 chunk 已透传：只能显式失败（透明重放会让用户看到重复内容）
                     log.warning("[llm] label={} 首 chunk 后失败({})，终止本轮: {}",

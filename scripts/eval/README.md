@@ -135,11 +135,14 @@ python eval/eval.py report --since 2026-11-05
 python eval/eval.py report --out eval/report/my_test.md
 ```
 
-报告内容分四块：
+报告内容分五块：
 1. **总览**：评测范围 / 题数 / EX / Valid SQL Rate / VES
-2. **题目概览**：数据集 / 难度分布 / 结果粒度 / ops Top 10
-3. **报告概览**：难度分布（题数/通过/EX）、重点标签（cte、window_function 等数仓特征标签）、题目结果清单（case/难度/标签/结果/失败归因）
-4. **逐题评估**：每道题完整执行链路复现（Thought → Tool → SQL → 最终回复）+ 召回评估（gold 表 vs agent 召回表）；LLM 输出统一用代码围栏包裹，避免与报告正文混排
+2. **成本与效率**：平均耗时 / P50 / P95 / 平均 LLM 与工具调用次数 / 平均与总量 tokens，并按「通过 vs 失败」分组对比（失败题通常更慢、调用更多，是迭代优先级依据）
+3. **题目概览**：数据集 / 难度分布 / 结果粒度 / ops Top 10
+4. **报告概览**：难度分布（题数/通过/EX）、重点标签（cte、window_function 等数仓特征标签）、题目结果清单（case/难度/标签/结果/失败归因）
+5. **逐题评估**：每道题完整执行链路复现（Thought → Tool → SQL → 最终回复）+ 召回评估（gold 表 vs agent 召回表）+ 耗时/tokens；LLM 输出统一用代码围栏包裹，避免与报告正文混排
+
+**tokens 口径**：来自 `telemetry.traces.prompt_tokens / completion_tokens`（由 LLM 流式 `stream_options.include_usage` 回传）。若某批 trace 的 usage 覆盖不全（如采集修复前的历史数据），报告显示 `未完整采集（n/N）` 而不输出失真均值。
 
 ## 数据库表
 

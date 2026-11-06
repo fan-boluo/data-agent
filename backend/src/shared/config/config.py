@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 
 from dotenv import load_dotenv
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-load_dotenv()
+# 强制按 config.py 所在目录定位 .env，不依赖 cwd（从 root 或 backend 目录启动都能加载到）
+_ENV_PATH = Path(__file__).resolve().parents[3] / ".env"
+load_dotenv(_ENV_PATH, override=False)
 
 """
 pydantic_settings
@@ -70,7 +73,7 @@ class Settings(BaseSettings):
     redis_db: int = 1
     redis_password: str = ""
 
-    qdrant_url:str = "localhost"
+    qdrant_url: str = "127.0.0.1"  # 默认用 IPv4；Windows 上 localhost 优先解析到 ::1 IPv6，而 Qdrant 只监听 IPv4 会导致 10061
     qdrant_port: int = 6333
     qdrant_api_key: str = ""
     # 注意：向量维度不在此配置 —— 以 backend/config.json 的 embedding.dimensions 为唯一来源，

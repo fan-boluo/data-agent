@@ -411,3 +411,13 @@ docs/ 下：
 - 语义层设计.md
 - 用户项目权限与存储隔离方案.md
 - [问答评测设计.md](./docs/问答评测设计.md) 
+
+scripts/:
+    - collector: 语义层采集脚本
+    - eval: sql问答评测问答对、评测脚本
+
+tests/:
+    - llm_breaker: 测试LLM熔断器
+    - test_chat_stream.py: 交互式基本测试
+    - test_concurrent.py: 测试并发请求
+

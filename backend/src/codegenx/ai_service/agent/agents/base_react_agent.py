@@ -44,12 +44,15 @@ class BaseReActAgent(Agent):
         self.max_same_tool_calls = self.agent_config.max_same_tool_calls or 3
         self.max_steps = self.agent_config.max_steps
 
-        # 初始化即解析默认智能体模型链
-        self.model_name = self.agent_config.resolved_model_name
-        # 准备llm,breaker
+        # 初始化即解析默认智能体模型链（首个为主模型，其余为 fallback）
+        self.model_chain: list[str] = list(self.agent_config.resolved_model_name_chain or [])
+        self.model_name = self.model_chain[0] if self.model_chain else ""
+        # 预热整条链的客户端与熔断器（构造即注册，不发网络请求）；
+        # 启动阶段的统一预热在 AgentRegistry.async_before_start，此处兜底独立调试场景
         with suppress(Exception):
-            get_llm(self.model_name)
-            get_breaker(self.model_name)
+            for model in self.model_chain:
+                get_llm(model)
+                get_breaker(model)
         # agent 间寻址标识与收件箱（agent_name 全局唯一）
         self.agent_name = self.agent_config.name
         self._inbox: asyncio.Queue | None = None
@@ -177,7 +180,7 @@ class BaseReActAgent(Agent):
         if not is_stream:
             llm_response = await resilient_invoke(
                 messages=messages,
-                chain = [self.model_name],
+                chain = self.model_chain,
                 label=self.agent_name,
                 tools=self.tools or None,
                 temperature=self.agent_config.temperature,
