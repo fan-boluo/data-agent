@@ -129,6 +129,26 @@ tool_latency_seconds = Histogram(
     buckets=[0.01, 0.05, 0.1, 0.5, 1, 2, 5, 10, 30],
 )
 
+# 工具级熔断（P0-2）：与模型级同构的三态状态机，按工具/数据源独立计数
+tool_circuit_state = Gauge(
+    "codegenx_tool_circuit_state",
+    "Tool circuit breaker state (0=closed 1=half_open 2=open)",
+    ["tool_name"],
+)
+
+tool_breaker_opens_total = Counter(
+    "codegenx_tool_breaker_opens_total",
+    "Tool circuit breaker open events",
+    ["tool_name"],
+)
+
+# 失败分类：exception / timeout / infra / business / circuit_open
+tool_errors_total = Counter(
+    "codegenx_tool_errors_total",
+    "Tool failures by error class",
+    ["tool_name", "error_class"],
+)
+
 # ---------------------------------------------------------------------------
 # Memory（memory/metrics.py 喂入 warm_extract 任务指标）
 # ---------------------------------------------------------------------------
@@ -210,6 +230,75 @@ memory_archived_total = Counter(
     "warm entries soft-deleted / archived",
     ["action"],
 )
+
+# ---------------------------------------------------------------------------
+# Embedding（embedding.py 喂入；熔断与 LLM/工具级同构，fast-fail 由调用方降级承接）
+# ---------------------------------------------------------------------------
+embedding_calls_total = Counter(
+    "codegenx_embedding_calls_total",
+    "Embedding batch calls by outcome",
+    ["model", "outcome"],
+)
+embedding_latency_seconds = Histogram(
+    "codegenx_embedding_latency_seconds",
+    "Embedding batch round-trip latency (retry included)",
+    ["model"],
+    buckets=[0.05, 0.1, 0.3, 0.5, 1, 2, 5, 10, 30],
+)
+embedding_batch_size = Histogram(
+    "codegenx_embedding_batch_size",
+    "Texts per embedding batch request",
+    ["model"],
+    buckets=[1, 2, 5, 10, 20, 50],
+)
+embedding_errors_total = Counter(
+    "codegenx_embedding_errors_total",
+    "Embedding failures by error class",
+    ["model", "error_class"],
+)
+# embedding 级熔断（通用 CircuitBreaker 以 metric_prefix 反射引用）
+embedding_breaker_opens_total = Counter(
+    "codegenx_embedding_breaker_opens_total",
+    "Embedding circuit breaker OPEN transitions",
+    ["circuit"],
+)
+embedding_circuit_state = Gauge(
+    "codegenx_embedding_circuit_state",
+    "Embedding circuit breaker state (0=closed 1=half_open 2=open)",
+    ["circuit"],
+)
+
+
+def classify_embedding_error(exc: Exception) -> str:
+    """embedding 失败分类：timeout / rate_limit / auth / connection / other。"""
+    name = type(exc).__name__.lower()
+    text = str(exc).lower()
+    if isinstance(exc, TimeoutError) or "timeout" in name or "timed out" in text:
+        return "timeout"
+    if "ratelimit" in name or "rate limit" in text or "429" in text:
+        return "rate_limit"
+    if (
+        "authentication" in name or "permission" in name or "apikey" in name
+        or "api key" in text or "401" in text or "403" in text
+    ):
+        return "auth"
+    if "connect" in name or "connect" in text or "network" in text:
+        return "connection"
+    return "other"
+
+
+def feed_embedding_call(
+    *, model: str, batch_size: int, latency_s: float, error_class: str = "",
+) -> None:
+    """单批 embedding 收口：批次计数 + 批大小 + 成功延迟/失败分类。"""
+    embedding_batch_size.labels(model=model).observe(max(0, batch_size))
+    if error_class:
+        embedding_calls_total.labels(model=model, outcome="error").inc()
+        embedding_errors_total.labels(model=model, error_class=error_class).inc()
+        return
+    embedding_calls_total.labels(model=model, outcome="ok").inc()
+    embedding_latency_seconds.labels(model=model).observe(max(0.0, latency_s))
+
 
 # ---------------------------------------------------------------------------
 # 错误
@@ -342,11 +431,14 @@ def feed_llm_attempt(
         get_streak_tracker().track_llm_latency(model=model, latency_s=total_ms / 1000)
 
 
-def feed_tool_call(*, app_id: str, session_id: str, tool_name: str, is_error: bool, latency_ms: float) -> None:
-    """单次工具调用：计数/延迟 + 连续失败 streak。"""
+def feed_tool_call(*, app_id: str, session_id: str, tool_name: str, is_error: bool,
+                   latency_ms: float, error_class: str = "") -> None:
+    """单次工具调用：计数/延迟 + 连续失败 streak + 失败分类（异常统一上报）。"""
     status = "error" if is_error else "ok"
     tool_calls_total.labels(app_id=app_id, tool_name=tool_name, status=status).inc()
     tool_latency_seconds.labels(app_id=app_id, tool_name=tool_name).observe(max(0.0, latency_ms) / 1000)
+    if is_error:
+        tool_errors_total.labels(tool_name=tool_name, error_class=error_class or "unknown").inc()
     get_streak_tracker().track_tool_outcome(session_id=session_id, tool_name=tool_name, is_error=is_error)
 
 

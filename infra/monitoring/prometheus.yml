@@ -1,54 +1,29 @@
-# my global config
+# Prometheus 配置模板：容器启动时由 compose 用 sed 替换 __BACKEND_TARGET__
+#   backend 在 compose 网络内：backend:8456（默认）
+#   后端跑在宿主机：host.docker.internal:8456（docker compose 启动时传 BACKEND_TARGET）
 global:
-  scrape_interval: 15s # Set the scrape interval to every 15 seconds. Default is every 1 minute.
-  evaluation_interval: 15s # Evaluate rules every 15 seconds. The default is every 1 minute.
-  # scrape_timeout is set to the global default (10s).
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  scrape_timeout: 10s
 
-# Alertmanager configuration
+# 告警交给 Alertmanager：分组/抑制/静默/路由由它负责
 alerting:
   alertmanagers:
     - static_configs:
-        - targets:
-          # - alertmanager:9093
+        - targets: ['alertmanager:9093']
 
-# Load rules once and periodically evaluate them according to the global 'evaluation_interval'.
 rule_files:
-  # - "first_rules.yml"
-  # - "second_rules.yml"
-  - 'prometheus_alerts.yml'
+  - /etc/prometheus/prometheus_alerts.yml
 
-
-# A scrape configuration containing exactly one endpoint to scrape:
-# Here it's Prometheus itself.
 scrape_configs:
-  # The job name is added as a label `job=<job_name>` to any timeseries scraped from this config.
-  - job_name: "prometheus"
-
-    # metrics_path defaults to '/metrics'
-    # scheme defaults to 'http'.
-
+  - job_name: prometheus
     static_configs:
-      - targets: ["localhost:9090"]
-       # The label name is added as a label `label_name=<label_value>` to any timeseries scraped from this config.
+      - targets: ['localhost:9090']
+
+  # 单后端应用（FastAPI，/metrics 由 prometheus_client 暴露）
+  - job_name: codegenx-backend
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['__BACKEND_TARGET__']
         labels:
-          app: "prometheus"
-
-  # 指标监控
-  - job_name: "ai-service"
-    scrape_interval: 15s
-    static_configs:
-      - targets: ['localhost:8000']
-    metrics_path: '/metrics'
-
-  # 微服务
-  - job_name: 'codegenx-services'
-    static_configs:
-      - targets: ['api-gateway:8000', 'user-service:8001', 'ai-service:8002', 'app-service:8004']
-
-  - job_name: 'mysql'
-    static_configs:
-      - targets: [ 'mysql-exporter:9104' ]
-
-  - job_name: 'redis'
-    static_configs:
-      - targets: [ 'redis-exporter:9121' ]
+          service: codegenx-backend

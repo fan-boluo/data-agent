@@ -44,10 +44,9 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: "Tool consecutive failures at {{ $value }}"
+          summary: "Tool {{ $labels.tool_name }} consecutive failures at {{ $value }}"
           description: >
-            App {{ $labels.app_id }} model {{ $labels.model }}:
-            tools have failed {{ $value }} times in a row.
+            Tool {{ $labels.tool_name }} has failed {{ $value }} times in a row.
             Check tool service health and connectivity.
 
       # -----------------------------------------------------------------------
@@ -65,3 +64,134 @@ groups:
             context token usage has exceeded the 85% threshold {{ $value }}
             consecutive times without compression taking effect.
             The context compressor may be broken or misconfigured.
+
+      # -----------------------------------------------------------------------
+      # 5. 模型级熔断器打开（critical，供告警治理演示：抑制同类 warning）
+      # -----------------------------------------------------------------------
+      - alert: LLMCircuitOpen
+        expr: codegenx_llm_circuit_state == 2
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "LLM circuit OPEN: {{ $labels.circuit }}"
+          description: >
+            Circuit {{ $labels.circuit }} has been OPEN for over 30s.
+            Requests to this model are being skipped; check upstream health
+            (quota / 403 / timeout) and confirm fallback models are serving.
+
+      # -----------------------------------------------------------------------
+      # 6. LLM 错误率过高（5 分钟窗口 > 20%）
+      # -----------------------------------------------------------------------
+      - alert: LLMErrorRateHigh
+        expr: |
+          sum(rate(codegenx_llm_calls_total{outcome=~"error_.*"}[5m]))
+          /
+          clamp_min(sum(rate(codegenx_llm_calls_total[5m])), 1e-9)
+          > 0.2
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "LLM error rate is above 20%"
+          description: >
+            {{ $value | humanizePercentage }} of LLM attempts failed in the last 5 minutes.
+            Check [llm_call] outcome breakdown in logs and upstream provider status.
+
+      # -----------------------------------------------------------------------
+      # 7. 工具/数据源级熔断打开（P0-2）
+      # -----------------------------------------------------------------------
+      - alert: ToolCircuitOpen
+        expr: codegenx_tool_circuit_state == 2
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Tool circuit OPEN: {{ $labels.tool_name }}"
+          description: >
+            Tool {{ $labels.tool_name }} has been circuit-opened for over 30s.
+            Check database connectivity / sandbox health. The tool now returns
+            fast failures until a half-open probe succeeds.
+
+      # -----------------------------------------------------------------------
+      # 8. Embedding 完全不可用（有失败、无成功）
+      # -----------------------------------------------------------------------
+      - alert: EmbeddingUnavailable
+        expr: |
+          sum by (model) (rate(codegenx_embedding_calls_total{outcome="error"}[5m])) > 0
+          and
+          sum by (model) (rate(codegenx_embedding_calls_total{outcome="ok"}[5m])) == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Embedding model unavailable: {{ $labels.model }}"
+          description: >
+            Embedding model {{ $labels.model }} has failed every batch in the last
+            2 minutes. Memory write / semantic retrieval will be degraded.
+
+      # -----------------------------------------------------------------------
+      # 9. Embedding 错误率过高（5 分钟窗口 > 20%）
+      # -----------------------------------------------------------------------
+      - alert: EmbeddingErrorRateHigh
+        expr: |
+          sum by (model) (rate(codegenx_embedding_calls_total{outcome="error"}[5m]))
+          /
+          clamp_min(sum by (model) (rate(codegenx_embedding_calls_total[5m])), 1e-9)
+          > 0.2
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Embedding error rate is above 20%"
+          description: >
+            {{ $value | humanizePercentage }} of embedding batches failed in the
+            last 5 minutes for model {{ $labels.model }}.
+            Check error_class breakdown (timeout / rate_limit / auth / connection).
+
+      # -----------------------------------------------------------------------
+      # 10. Embedding 延迟过高（P95 > 5s）
+      # -----------------------------------------------------------------------
+      - alert: EmbeddingLatencyHigh
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le, model) (rate(codegenx_embedding_latency_seconds_bucket[5m]))
+          ) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Embedding P95 latency is high"
+          description: >
+            Embedding model {{ $labels.model }} P95 latency is
+            {{ $value }}s over the last 5 minutes, exceeding 5s.
+
+      # -----------------------------------------------------------------------
+      # 11. Embedding 熔断打开（critical，与 LLM/工具级对齐；快速版不可用告警）
+      # -----------------------------------------------------------------------
+      - alert: EmbeddingCircuitOpen
+        expr: codegenx_embedding_circuit_state == 2
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Embedding circuit OPEN: {{ $labels.circuit }}"
+          description: >
+            Embedding circuit {{ $labels.circuit }} has been OPEN for over 30s.
+            Memory vector sync / semantic vector recall are degraded to
+            keyword-only until a half-open probe succeeds.
+
+      # -----------------------------------------------------------------------
+      # 12. LLM 熔断反复抖动（1h 内 OPEN 次数 >= 3，不属于真正恢复）
+      # -----------------------------------------------------------------------
+      - alert: LLMCircuitFlapping
+        expr: sum by (circuit) (increase(codegenx_llm_breaker_opens_total[1h])) >= 3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "LLM circuit flapping: {{ $labels.circuit }}"
+          description: >
+            Circuit {{ $labels.circuit }} has opened {{ $value }} times in the
+            last hour. The upstream is unstable (intermittent success in
+            HALF_OPEN), not truly recovered.

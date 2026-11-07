@@ -127,6 +127,15 @@ class EmbeddingConfig(Base):
         validation_alias=AliasChoices("apiTimeoutSeconds", "api_timeout_seconds", "apiTimeout"),
     )
     dimensions: int = 512
+    # 熔断：连续失败 N 批打开，冷却期后半开探测（与 LLM/工具级同构）
+    breaker_failure_threshold: int = Field(
+        default=3,
+        validation_alias=AliasChoices("breakerFailureThreshold", "breaker_failure_threshold"),
+    )
+    breaker_recovery_timeout_seconds: float = Field(
+        default=60.0,
+        validation_alias=AliasChoices("breakerRecoveryTimeoutSeconds", "breaker_recovery_timeout_seconds"),
+    )
 
     @property
     def embedding_path(self) -> str:
@@ -171,12 +180,27 @@ class ToolsMysqlConfig(Base):
     )
 
 
+class ToolCircuitConfig(Base):
+    """工具/数据源级熔断（P0-2）。
+
+    只统计基础设施类失败（异常/超时/连接与资源错误）；SQL 语法、参数错误等
+    业务失败仅上报指标与日志，不计入熔断，避免用户连续写错 SQL 触发工具不可用。
+    """
+    enabled: bool = True
+    failure_threshold: int = 5              # 连续基础设施失败次数阈值
+    recovery_timeout_seconds: float = 30.0  # OPEN 冷却期
+    half_open_max_calls: int = 2            # 半开探测名额
+    half_open_success_rate: float = 0.5     # 探测成功率达标即闭合
+    timeout_seconds: float = 0.0            # 单次工具执行超时；0=不启用（沿用工具内部超时）
+
+
 class ToolsConfig(Base):
     """Tools configuration."""
     excluded:list = Field(default_factory=list)
     persist_threshold: int = Field(default=30000)  # 持久化阈值
     preview_chars: int = Field(default=2000) # 展示长度
     mysql: ToolsMysqlConfig = Field(default_factory=ToolsMysqlConfig)  # 数据分析工具的只读连接
+    circuit: ToolCircuitConfig = Field(default_factory=ToolCircuitConfig)  # 工具级熔断
     # exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
     # restrict_to_workspace: bool = False  # If true, restrict all tool access to workspace directory
     # mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)

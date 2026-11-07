@@ -95,8 +95,14 @@ async def search_warm(app_id: str, user_id: str, query: str) -> list[MemoryEntry
     semantic: dict[int, float] = {}
 
     async def _vector_channel() -> None:
+        # embedding 与 Qdrant 分开归因降级（embedding 失败 ≠ 向量库故障）
         try:
             query_vector = await get_embedding_client().embed_query(query)
+        except Exception as exc:  # noqa: BLE001 — embedding 失败降级，不影响关键词通道
+            metrics.inc_degrade("embedding")
+            log.warning("warm embedding 失败，仅用关键词通道:{}", exc)
+            return
+        try:
             for pid, score in await search_by_vector(
                 app_id=app_id,
                 user_id=user_id,
@@ -105,9 +111,9 @@ async def search_warm(app_id: str, user_id: str, query: str) -> list[MemoryEntry
                 score_threshold=cfg.score_threshold,
             ):
                 semantic[pid] = score
-        except Exception as exc:  # noqa: BLE001 — 向量通道失败降级，不影响关键词通道
+        except Exception as exc:  # noqa: BLE001 — 向量库失败降级，不影响关键词通道
             metrics.inc_degrade("qdrant")
-            log.warning("warm 向量通道失败（embedding/Qdrant），仅用关键词通道:{}", exc)
+            log.warning("warm 向量检索失败（Qdrant），仅用关键词通道:{}", exc)
             return
 
     keyword_query = build_keyword_query(query)
@@ -188,17 +194,23 @@ async def debug_recall(app_id: str, user_id: str, query: str) -> dict:
     semantic: dict[int, float] = {}
     try:
         query_vector = await get_embedding_client().embed_query(query)
-        for pid, score in await search_by_vector(
-            app_id=app_id,
-            user_id=user_id,
-            query_vector=query_vector,
-            limit=int(getattr(cfg, "recall_top_n", 0) or cfg.top_k or 24),
-            score_threshold=cfg.score_threshold,
-        ):
-            semantic[pid] = score
-    except Exception as exc:  # noqa: BLE001 — 模拟工具照实记录降级
-        metrics.inc_degrade("qdrant")
-        trace["vector_error"] = f"{type(exc).__name__}: {exc}"
+    except Exception as exc:  # noqa: BLE001 — 模拟工具照实记录降级（与召回主入口同归因）
+        metrics.inc_degrade("embedding")
+        trace["vector_error"] = f"embedding {type(exc).__name__}: {exc}"
+        query_vector = None
+    if query_vector is not None:
+        try:
+            for pid, score in await search_by_vector(
+                app_id=app_id,
+                user_id=user_id,
+                query_vector=query_vector,
+                limit=int(getattr(cfg, "recall_top_n", 0) or cfg.top_k or 24),
+                score_threshold=cfg.score_threshold,
+            ):
+                semantic[pid] = score
+        except Exception as exc:  # noqa: BLE001
+            metrics.inc_degrade("qdrant")
+            trace["vector_error"] = f"qdrant {type(exc).__name__}: {exc}"
     trace["vector_hits"] = [
         {"agent_memory_id": pid, "raw_score": round(s, 4)}
         for pid, s in sorted(semantic.items(), key=lambda kv: -kv[1])

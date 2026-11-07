@@ -118,11 +118,17 @@ async def write_memories(
             vectors = await get_embedding_client().embed_texts(
                 [e.inject_text() for e in warm_entries]
             )
-            await upsert_points(warm_entries, vectors)
-            await mark_vector_synced([e.id for e in warm_entries])
-        except Exception as exc:  # noqa: BLE001
-            metrics.inc_degrade("qdrant")
-            log.warning("warm 向量批量同步失败（vector_synced_at 留 NULL，待对账补写）:{}", exc)
+        except Exception as exc:  # noqa: BLE001 — embedding 失败与向量库失败分开归因
+            metrics.inc_degrade("embedding")
+            log.warning("warm 向量 embedding 失败（vector_synced_at 留 NULL，待对账补写）:{}", exc)
+            vectors = None
+        if vectors is not None:
+            try:
+                await upsert_points(warm_entries, vectors)
+                await mark_vector_synced([e.id for e in warm_entries])
+            except Exception as exc:  # noqa: BLE001
+                metrics.inc_degrade("qdrant")
+                log.warning("warm 向量批量同步失败（vector_synced_at 留 NULL，待对账补写）:{}", exc)
 
     return written_ids
 

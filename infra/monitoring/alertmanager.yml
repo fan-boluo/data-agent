@@ -1,0 +1,32 @@
+# Alertmanager：告警分组 / 抑制 / 路由
+# 本地验证用 alert-sink 接收（compose 内的 monitoring profile），
+# 接飞书/企微时把 webhook_configs.url 换成对应机器人地址即可。
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: webhook
+  group_by: [alertname, circuit, tool_name]   # 同一对象的告警合并，避免刷屏
+  group_wait: 10s
+  group_interval: 30s
+  repeat_interval: 1h
+  routes:
+    - matchers: ['severity="critical"']
+      receiver: webhook
+      group_wait: 5s
+      repeat_interval: 30m
+    - matchers: ['severity="warning"']
+      receiver: webhook
+
+# critical 抑制同一服务的 warning（同 job 视为同一服务）
+inhibit_rules:
+  - source_matchers: ['severity="critical"']
+    target_matchers: ['severity="warning"']
+    equal: [job]
+
+receivers:
+  - name: webhook
+    webhook_configs:
+      - url: http://alert-sink:9000/alert
+        send_resolved: true
+        max_alerts: 20

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 from codegenx.ai_service.component import BaseComponent, ComponentType
 from codegenx.ai_service.tools.base import ToolResult
 from codegenx.ai_service.agent.runtime_schema import RuntimeSessionState, TurnStoppedError
+from codegenx.ai_service.agent.tool_circuit import get_tool_breaker, is_infra_failure
 from codegenx.ai_service.hook import HookContext, HookDecision, HookEvent, on, hook_manager
 from codegenx.ai_service.system_app import get_app
 from codegenx.ai_service.trace import  start_span
@@ -134,6 +135,15 @@ class ToolExecutor(BaseComponent):
     def init_app(self, system_app: "SystemApp") -> None:
         # 无状态服务类，仅持有容器引用（工具查找时经 get_app() 取注册表）
         self.system_app = system_app
+
+    async def async_before_start(self) -> None:
+        """预热：为已注册工具创建熔断器，启动后 /metrics 即可看到全部工具状态。"""
+        try:
+            for tool in get_app().tool_registry.tools:
+                get_tool_breaker(str(tool.name))
+            log.info("[tool_breaker] 预热完成，共 {} 个工具熔断器", len(get_app().tool_registry.tools))
+        except Exception as exc:  # 预热失败不阻断启动，首次真实调用再建
+            log.warning("[tool_breaker] 预热失败（不阻断启动）: {}", exc)
 
     # 单个工具结果回填对话的最大字符数（防止撑爆上下文）
     MAX_TOOL_RESULT_CHARS = 8000
@@ -273,23 +283,37 @@ class ToolExecutor(BaseComponent):
                 tool_input.setdefault("db_schema", db_schema)
             tool_input.setdefault("app_id", app_id)
 
-        # BEFORE_TOOL_CALL 钩子（参数注入后触发，让守卫看到完整参数；不修改调用方原 tool_call）
+        # 1. 查找工具（先确认工具存在，再进入熔断/钩子，避免无效工具产生熔断器）
+        tool = next((t for t in get_app().tool_registry.tools if t.name == tool_name), None)
+        if not tool:
+            log.error(f"Unknown tool called: {tool_name}")
+            return ToolResult(success=False, message=f"未知工具：{tool_name}")
+
+        # 2. 工具级熔断：打开期直接快速失败。
+        #    在 BEFORE 钩子之前返回，避免 sql_trace_start 等监听器留下半截埋点。
+        breaker = get_tool_breaker(str(tool_name))
+        if not await breaker.acquire():
+            feed_tool_call(app_id=app_id, session_id=session_id, tool_name=str(tool_name),
+                           is_error=True, latency_ms=0.0, error_class="circuit_open")
+            log.warning("[tool_call] tool={} status=circuit_open app_id={} session_id={}",
+                        tool_name, app_id, session_id)
+            return ToolResult(
+                success=False,
+                message=f"工具 {tool_name} 暂时不可用（熔断打开），请稍后重试或改用其他工具",
+            )
+
+        # 3. BEFORE_TOOL_CALL 钩子（参数注入后触发，让守卫看到完整参数；不修改调用方原 tool_call）
         # turn 取自 session_state.activate_turn（monitor/sql_trace 等监听器依赖 ctx.turn）
         turn = getattr(session_state, "activate_turn", None) if session_state is not None else None
         before_ctx = HookContext(event=HookEvent.BEFORE_TOOL_CALL, session=session_state, turn=turn)
         before_ctx.data["tool_call"] = {**tool_call, "arguments": tool_input}
         await hook_manager.dispatch(HookEvent.BEFORE_TOOL_CALL, before_ctx)
         if before_ctx.action == "blocked":
+            await breaker.release()  # 未执行：归还半开探测名额
             log.info("工具 {} 被 BEFORE_TOOL_CALL 钩子阻断: {}", tool_name, before_ctx.message)
             return ToolResult(success=False, message=before_ctx.message or "Tool blocked by hook")
 
-        # 1. 查找工具
-        tool = next((t for t in get_app().tool_registry.tools if t.name == tool_name), None)
-        if not tool:
-            log.error(f"Unknown tool called: {tool_name}")
-            return ToolResult(success=False, message=f"未知工具：{tool_name}")
-
-        # 2. 工具执行（trace 直埋：注册表 obs_category 决定 op_type——tool/retrieval；
+        # 4. 工具执行（trace 直埋：注册表 obs_category 决定 op_type——tool/retrieval；
         #    with 块天然维护 parent 栈，工具内派发的子 agent/llm span 挂本 span 下）
         func = tool.executor
         call_kwargs = {"params": tool_input}
@@ -299,15 +323,28 @@ class ToolExecutor(BaseComponent):
         # （如 dispatch_agent：需要停止信号、看板握手、结果入史等会话能力）
         if "session_state" in inspect.signature(func).parameters:
             call_kwargs["session_state"] = session_state
+        # 工具级超时（配置 0 = 关闭，沿用工具内部超时）
+        circuit_cfg = config.tools.circuit
+        timeout = circuit_cfg.timeout_seconds if circuit_cfg.enabled and circuit_cfg.timeout_seconds > 0 else None
         t0 = time.monotonic()
+        error_class = ""
         # tool span input 携带 LLM 调用 id（协议溯源，与 llm span output.tool_calls[].id 对账）
         span_input = {"tool_call_id": str(tool_call.get("id") or ""), **tool_input}
         async with start_span(str(tool.obs_category or "tool"), str(tool_name),
                               input_data=span_input) as span:
-            if inspect.iscoroutinefunction(func):
-                result = await func(**call_kwargs)
-            else:
+            try:
                 result = func(**call_kwargs)
+                if inspect.isawaitable(result):
+                    result = await asyncio.wait_for(result, timeout)
+            except (TurnStoppedError, asyncio.CancelledError):
+                await breaker.release()  # 取消无结果：归还半开探测名额
+                raise
+            except Exception as exc:
+                # 异常统一收口为失败结果：后续指标/日志/熔断记账不会被跳过
+                error_class = "timeout" if isinstance(exc, (asyncio.TimeoutError, TimeoutError)) else "exception"
+                log.warning("[tool_call] tool={} status=error class={} app_id={} session_id={} err={}: {}",
+                            tool_name, error_class, app_id, session_id, type(exc).__name__, exc)
+                result = ToolResult(success=False, message=f"{type(exc).__name__}: {exc}")
             # 骨架收尾：输出概要 + 成败（语义字段由 AFTER 监听器单独落表）
             message = str(getattr(result, "message", "") or "")
             span.set_output({
@@ -317,8 +354,22 @@ class ToolExecutor(BaseComponent):
             })
             span.set_status(ok=bool(result.success), error=message or None)
             span_id = span.span["span_id"] if span.span else None
-        feed_tool_call(app_id=session_state.app_id, session_id=session_state.session_id,tool_name=str(tool_name),
-                       is_error=not result.success, latency_ms=(time.monotonic() - t0) * 1000)
+
+        # 熔断记账：成功复位；失败区分基础设施（计入）与业务失败（只上报）
+        if result.success:
+            await breaker.record_success()
+        else:
+            counted = bool(error_class) or is_infra_failure(message=result.message)
+            error_class = error_class or ("infra" if counted else "business")
+            await breaker.record_failure(count_as_failure=counted)
+
+        latency_ms = (time.monotonic() - t0) * 1000
+        feed_tool_call(app_id=app_id, session_id=session_id, tool_name=str(tool_name),
+                       is_error=not result.success, latency_ms=latency_ms,
+                       error_class=error_class if not result.success else "")
+        log.debug("[tool_call] tool={} status={} class={} latency_ms={:.1f} app_id={} session_id={}",
+                  tool_name, "ok" if result.success else "error", error_class or "-",
+                  latency_ms, app_id, session_id)
 
         # AFTER_TOOL_CALL 钩子（parallel 容错分发：语义落表/落盘/记忆信号等）
         after_ctx = HookContext(event=HookEvent.AFTER_TOOL_CALL, session=session_state, turn=turn)

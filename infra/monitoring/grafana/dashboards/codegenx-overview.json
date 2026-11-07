@@ -1,0 +1,275 @@
+{
+  "uid": "codegenx-overview",
+  "title": "CodeGenX · Agent 运行总览",
+  "tags": ["codegenx", "agent"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 4,
+  "refresh": "30s",
+  "editable": true,
+  "graphTooltip": 1,
+  "time": {"from": "now-1h", "to": "now"},
+  "templating": {"list": []},
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "LLM 熔断 OPEN 数",
+      "gridPos": {"h": 6, "w": 4, "x": 0, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "count(codegenx_llm_circuit_state == 2) or vector(0)", "instant": true}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "background", "graphMode": "none", "textMode": "auto"},
+      "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}}, "overrides": []}
+    },
+    {
+      "id": 2,
+      "type": "state-timeline",
+      "title": "LLM 熔断状态（0=CLOSED 1=HALF_OPEN 2=OPEN；变绿即恢复）",
+      "gridPos": {"h": 6, "w": 16, "x": 4, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "codegenx_llm_circuit_state", "legendFormat": "{{circuit}}"}],
+      "options": {"showValue": "auto", "mergeValues": true, "rowHeight": 0.9, "legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}},
+      "fieldConfig": {"defaults": {"min": 0, "max": 2, "mappings": [{"type": "value", "options": {"0": {"text": "CLOSED", "color": "green", "index": 0}, "1": {"text": "HALF_OPEN", "color": "yellow", "index": 1}, "2": {"text": "OPEN", "color": "red", "index": 2}}}], "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 1}, {"color": "red", "value": 2}]}}, "overrides": []}
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "工具熔断 OPEN 数",
+      "gridPos": {"h": 6, "w": 4, "x": 20, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "count(codegenx_tool_circuit_state == 2) or vector(0)", "instant": true}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "background", "graphMode": "none", "textMode": "auto"},
+      "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 1}, {"color": "red", "value": 3}]}}, "overrides": []}
+    },
+    {
+      "id": 20,
+      "type": "table",
+      "title": "模型健康矩阵（LLM + Embedding：熔断状态 + 有流量时的成功率/错误/P95）",
+      "description": "LLM 与 Embedding 统一视图。熔断状态始终显示；成功率/错误数/P95 等列仅在统计窗口内有调用时出现，零流量时不显示（无数据可算）。熔断通知由告警负责（LLMCircuitOpen / EmbeddingCircuitOpen / ToolCircuitOpen），看板用于人工查看。",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 6},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "label_replace(codegenx_llm_circuit_state, \"model\", \"$1\", \"circuit\", \".*:(.*)\") or label_replace(codegenx_embedding_circuit_state, \"model\", \"$1\", \"circuit\", \".*:(.*)\")", "instant": true, "format": "table"},
+        {"refId": "B", "expr": "sum by (model) (rate(codegenx_llm_calls_total{outcome=\"ok\"}[5m])) / clamp_min(sum by (model) (rate(codegenx_llm_calls_total[5m])), 1e-9) or sum by (model) (rate(codegenx_embedding_calls_total{outcome=\"ok\"}[5m])) / clamp_min(sum by (model) (rate(codegenx_embedding_calls_total[5m])), 1e-9)", "instant": true, "format": "table"},
+        {"refId": "C", "expr": "sum by (model) (rate(codegenx_llm_calls_total[5m])) or sum by (model) (rate(codegenx_embedding_calls_total[5m]))", "instant": true, "format": "table"},
+        {"refId": "D", "expr": "round(sum by (model) (increase(codegenx_llm_calls_total{outcome=~\"error_.*\"}[1h]))) or round(sum by (model) (increase(codegenx_embedding_calls_total{outcome=\"error\"}[1h])))", "instant": true, "format": "table"},
+        {"refId": "F", "expr": "histogram_quantile(0.95, sum by (le, model) (rate(codegenx_llm_latency_seconds_bucket[$__rate_interval]))) or histogram_quantile(0.95, sum by (le, model) (rate(codegenx_embedding_latency_seconds_bucket[$__rate_interval])))", "instant": true, "format": "table"},
+        {"refId": "G", "expr": "histogram_quantile(0.95, sum by (le, model) (rate(codegenx_llm_first_token_seconds_bucket[$__rate_interval])))", "instant": true, "format": "table"},
+        {"refId": "H", "expr": "round(sum by (model) (increase(codegenx_llm_fallback_total[1h])))", "instant": true, "format": "table"}
+      ],
+      "transformations": [
+        {"id": "joinByField", "options": {"byField": "model", "mode": "outer"}},
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true, "__name__": true, "instance": true, "job": true, "service": true,
+              "circuit": true, "value": true, "Value": true,
+              "Time #A": true, "Time #B": true, "Time #C": true, "Time #D": true,
+              "Time #F": true, "Time #G": true, "Time #H": true,
+              "job #A": true, "job #B": true, "job #C": true, "job #D": true,
+              "job #F": true, "job #G": true, "job #H": true,
+              "instance #A": true, "instance #B": true, "instance #C": true, "instance #D": true,
+              "instance #F": true, "instance #G": true, "instance #H": true,
+              "service #A": true, "service #B": true, "service #C": true, "service #D": true,
+              "service #F": true, "service #G": true, "service #H": true,
+              "__name__ #A": true, "__name__ #B": true, "__name__ #C": true, "__name__ #D": true,
+              "__name__ #F": true, "__name__ #G": true, "__name__ #H": true
+            },
+            "renameByName": {
+              "model": "模型",
+              "Value #A": "熔断状态",
+              "Value #B": "5m 成功率",
+              "Value #C": "5m 请求/s",
+              "Value #D": "1h 错误数",
+              "Value #F": "P95 延迟 (s)",
+              "Value #G": "P95 首Token (s)",
+              "Value #H": "1h 降级次数"
+            }
+          }
+        }
+      ],
+      "options": {"showHeader": true, "cellHeight": "sm", "footer": {"show": false}, "sortBy": [{"displayName": "1h 错误数", "desc": true}]},
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "模型"}, "properties": [{"id": "custom.width", "value": 200}]},
+          {"matcher": {"id": "byName", "options": "熔断状态"}, "properties": [
+            {"id": "mappings", "value": [{"type": "value", "options": {"0": {"text": "CLOSED", "color": "green", "index": 0}, "1": {"text": "HALF_OPEN", "color": "yellow", "index": 1}, "2": {"text": "OPEN", "color": "red", "index": 2}}}]},
+            {"id": "custom.align", "value": "center"}
+          ]},
+          {"matcher": {"id": "byName", "options": "5m 成功率"}, "properties": [{"id": "unit", "value": "percentunit"}, {"id": "decimals", "value": 2}, {"id": "custom.align", "value": "center"}, {"id": "thresholds", "value": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "yellow", "value": 0.9}, {"color": "green", "value": 0.99}]}}, {"id": "custom.cellOptions", "value": {"type": "color-background", "mode": "basic"}}]},
+          {"matcher": {"id": "byName", "options": "5m 请求/s"}, "properties": [{"id": "unit", "value": "reqps"}, {"id": "decimals", "value": 2}, {"id": "custom.align", "value": "center"}]},
+          {"matcher": {"id": "byName", "options": "1h 错误数"}, "properties": [{"id": "unit", "value": "short"}, {"id": "decimals", "value": 0}, {"id": "custom.align", "value": "center"}]},
+          {"matcher": {"id": "byName", "options": "P95 延迟 (s)"}, "properties": [{"id": "unit", "value": "s"}, {"id": "decimals", "value": 2}, {"id": "custom.align", "value": "center"}]},
+          {"matcher": {"id": "byName", "options": "P95 首Token (s)"}, "properties": [{"id": "unit", "value": "s"}, {"id": "decimals", "value": 2}, {"id": "custom.align", "value": "center"}]},
+          {"matcher": {"id": "byName", "options": "1h 降级次数"}, "properties": [{"id": "unit", "value": "short"}, {"id": "decimals", "value": 0}, {"id": "custom.align", "value": "center"}]}
+        ]
+      }
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "模型请求速率（成功；掉量=流量已切到 fallback）",
+      "gridPos": {"h": 7, "w": 12, "x": 0, "y": 14},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "sum by (model) (rate(codegenx_llm_calls_total{outcome=\"ok\"}[$__rate_interval]))", "legendFormat": "{{model}}"}],
+      "fieldConfig": {"defaults": {"unit": "reqps", "custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never"}}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}}
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "模型 5m 错误率（>20% 触发告警）",
+      "gridPos": {"h": 7, "w": 12, "x": 12, "y": 14},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "sum by (model) (rate(codegenx_llm_calls_total{outcome=~\"error_.*\"}[5m])) / clamp_min(sum by (model) (rate(codegenx_llm_calls_total[5m])), 1e-9)", "legendFormat": "{{model}}"}],
+      "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 0.05}, {"color": "red", "value": 0.2}]}}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}}
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "LLM 延迟 P50 / P95（按模型）",
+      "gridPos": {"h": 7, "w": 12, "x": 0, "y": 21},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "histogram_quantile(0.5, sum by (le, model) (rate(codegenx_llm_latency_seconds_bucket[$__rate_interval])))", "legendFormat": "{{model}} · P50"},
+        {"refId": "B", "expr": "histogram_quantile(0.95, sum by (le, model) (rate(codegenx_llm_latency_seconds_bucket[$__rate_interval])))", "legendFormat": "{{model}} · P95"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s", "custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never"}}, "overrides": [{"matcher": {"id": "byRegexp", "options": ".*P50"}, "properties": [{"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [6, 4]}}]}]},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}}
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "首 Token 延迟 P50 / P95（按模型）",
+      "gridPos": {"h": 7, "w": 12, "x": 12, "y": 21},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "histogram_quantile(0.5, sum by (le, model) (rate(codegenx_llm_first_token_seconds_bucket[$__rate_interval])))", "legendFormat": "{{model}} · P50"},
+        {"refId": "B", "expr": "histogram_quantile(0.95, sum by (le, model) (rate(codegenx_llm_first_token_seconds_bucket[$__rate_interval])))", "legendFormat": "{{model}} · P95"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s", "custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never"}}, "overrides": [{"matcher": {"id": "byRegexp", "options": ".*P50"}, "properties": [{"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [6, 4]}}]}]},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}}
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "生成速率（tokens/s，按模型）",
+      "description": "completion tokens / LLM 调用耗时，真实反映模型产出速度；下降说明模型变慢或被限流。",
+      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 28},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "sum by (model) (rate(codegenx_llm_completion_tokens_total[$__rate_interval])) / clamp_min(sum by (model) (rate(codegenx_llm_latency_seconds_sum[$__rate_interval])), 1e-9)", "legendFormat": "{{model}}"}],
+      "fieldConfig": {"defaults": {"unit": "short", "custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never"}}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}}
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "平均上下文（prompt tokens/次；持续上升=压缩失效）",
+      "gridPos": {"h": 7, "w": 8, "x": 8, "y": 28},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "sum by (model) (rate(codegenx_llm_prompt_tokens_total[$__rate_interval])) / clamp_min(sum by (model) (rate(codegenx_llm_calls_total{outcome=\"ok\"}[$__rate_interval])), 1e-9)", "legendFormat": "{{model}}"}],
+      "fieldConfig": {"defaults": {"unit": "short", "custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never"}}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}}
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "重试 / 降级（按模型；fallback 回落=主模型已恢复）",
+      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 28},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "sum by (model) (rate(codegenx_llm_retry_total[$__rate_interval]))", "legendFormat": "retry · {{model}}"},
+        {"refId": "B", "expr": "sum by (model) (rate(codegenx_llm_fallback_total[$__rate_interval]))", "legendFormat": "fallback · {{model}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "ops", "custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never"}}, "overrides": [{"matcher": {"id": "byRegexp", "options": "fallback.*"}, "properties": [{"id": "custom.drawStyle", "value": "bars"}, {"id": "custom.fillOpacity", "value": 40}]}]},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}}
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Embedding 成功率（5m，按模型）",
+      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 35},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "sum by (model) (rate(codegenx_embedding_calls_total{outcome=\"ok\"}[5m])) / clamp_min(sum by (model) (rate(codegenx_embedding_calls_total[5m])), 1e-9)", "legendFormat": "{{model}}"}],
+      "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1, "custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never"}, "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "yellow", "value": 0.9}, {"color": "green", "value": 0.99}]}}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "Embedding 延迟 P95（按模型，含重试）",
+      "gridPos": {"h": 7, "w": 8, "x": 8, "y": 35},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "histogram_quantile(0.95, sum by (le, model) (rate(codegenx_embedding_latency_seconds_bucket[$__rate_interval])))", "legendFormat": "{{model}}"}],
+      "fieldConfig": {"defaults": {"unit": "s", "custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never"}}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "Embedding 错误分类（1h 增量）",
+      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 35},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "sum by (error_class) (increase(codegenx_embedding_errors_total[1h]))", "legendFormat": "{{error_class}}"}],
+      "fieldConfig": {"defaults": {"unit": "short", "custom": {"drawStyle": "bars", "fillOpacity": 50, "lineWidth": 1, "showPoints": "never"}}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}}
+    },
+    {
+      "id": 14,
+      "type": "table",
+      "title": "工具执行错误明细（telemetry，随看板时间范围）",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 42},
+      "datasource": {"type": "postgres", "uid": "telemetry-pg"},
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT started_at AS \"时间\", name AS \"工具\", error AS \"错误信息\", input->>'tool_call_id' AS tool_call_id, session_id, trace_id FROM telemetry.trace_spans WHERE status = 'error' AND op_type IN ('tool','retrieval') AND $__timeFilter(started_at) ORDER BY started_at DESC LIMIT 200"
+        }
+      ],
+      "options": {"showHeader": true, "cellHeight": "sm"},
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "时间"}, "properties": [{"id": "custom.width", "value": 170}]},
+          {"matcher": {"id": "byName", "options": "工具"}, "properties": [{"id": "custom.width", "value": 160}]},
+          {"matcher": {"id": "byName", "options": "tool_call_id"}, "properties": [{"id": "custom.width", "value": 200}]}
+        ]
+      }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "工具延迟 P95（TOP6）",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 42},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "topk(6, histogram_quantile(0.95, sum by (le, tool_name) (rate(codegenx_tool_latency_seconds_bucket[$__rate_interval]))))", "legendFormat": "{{tool_name}}"}],
+      "fieldConfig": {"defaults": {"unit": "s", "custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never"}}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}}
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "记忆热区 Token 水位（最大）",
+      "gridPos": {"h": 7, "w": 12, "x": 0, "y": 50},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "max(codegenx_memory_hot_token_usage_ratio)", "legendFormat": "hot ratio"}],
+      "fieldConfig": {"defaults": {"unit": "percentunit", "custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never"}}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "id": 13,
+      "type": "state-timeline",
+      "title": "工具熔断状态（0=CLOSED 1=HALF_OPEN 2=OPEN）",
+      "gridPos": {"h": 7, "w": 12, "x": 12, "y": 50},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "codegenx_tool_circuit_state", "legendFormat": "{{tool_name}}"}],
+      "options": {"showValue": "auto", "mergeValues": true, "rowHeight": 0.9, "legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}},
+      "fieldConfig": {"defaults": {"min": 0, "max": 2, "mappings": [{"type": "value", "options": {"0": {"text": "CLOSED", "color": "green", "index": 0}, "1": {"text": "HALF_OPEN", "color": "yellow", "index": 1}, "2": {"text": "OPEN", "color": "red", "index": 2}}}], "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 1}, {"color": "red", "value": 2}]}}, "overrides": []}
+    }
+  ]
+}

@@ -137,7 +137,8 @@ class MonitorQueryService:
                        (array_agg(NULLIF(model,'') ORDER BY started_at DESC))[1] AS model,
                        bool_or(status = 'running')                               AS is_running,
                        bool_and(status IN ('completed','stopped'))               AS all_success,
-                       COUNT(*)                                                  AS total_turns,
+                       -- 轮次只统计问答 turn（event='qa'），不含 session_summary 等后台 trace
+                       COUNT(*) FILTER (WHERE event = 'qa')                      AS total_turns,
                        COALESCE(SUM(prompt_tokens), 0)                           AS prompt_tokens,
                        COALESCE(SUM(completion_tokens), 0)                       AS completion_tokens,
                        COALESCE(SUM(total_tokens), 0)                            AS total_tokens,
@@ -198,7 +199,8 @@ class MonitorQueryService:
                        (array_agg(NULLIF(model,'') ORDER BY started_at DESC))[1] AS model,
                        bool_or(status = 'running')                               AS is_running,
                        bool_and(status IN ('completed','stopped'))               AS all_success,
-                       COUNT(*)                                                  AS total_turns,
+                       -- 轮次只统计问答 turn（event='qa'），不含 session_summary 等后台 trace
+                       COUNT(*) FILTER (WHERE event = 'qa')                      AS total_turns,
                        COALESCE(SUM(prompt_tokens), 0)                           AS prompt_tokens,
                        COALESCE(SUM(completion_tokens), 0)                       AS completion_tokens,
                        COALESCE(SUM(total_tokens), 0)                            AS total_tokens,
@@ -217,7 +219,8 @@ class MonitorQueryService:
                        started_at, ended_at, duration_ms,
                        ROW_NUMBER() OVER (ORDER BY started_at) AS turn_number
                 FROM telemetry.traces
-                WHERE session_id = $1 ORDER BY started_at DESC LIMIT 100
+                -- Turn 链路只展示问答 turn，session_summary 等后台 trace 暂不纳入
+                WHERE session_id = $1 AND event = 'qa' ORDER BY started_at DESC LIMIT 100
                 """,
                 normalized,
             )

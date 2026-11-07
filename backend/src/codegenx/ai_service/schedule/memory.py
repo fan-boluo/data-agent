@@ -120,6 +120,12 @@ class MemoryScheduler(BaseComponent):
                 get_llm(model)
                 get_breaker(model)
                 log.info("[memory_scheduler] 记忆提炼模型客户端已预热: {}", model)
+        # 预热 embedding 客户端：构造即注册熔断器 gauge（健康矩阵/告警启动即可见，
+        # 不必等首次向量调用；语义层检索共用该进程内单例），不发网络请求
+        with contextlib.suppress(Exception):
+            from codegenx.ai_service.llm.embedding import get_embedding_client
+            get_embedding_client()
+            log.info("[memory_scheduler] embedding 客户端已预热")
         with contextlib.suppress(Exception):
             await self.startup()
 

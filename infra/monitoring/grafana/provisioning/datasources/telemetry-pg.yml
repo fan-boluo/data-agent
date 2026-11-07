@@ -1,0 +1,15 @@
+apiVersion: 1
+
+datasources:
+  - name: Telemetry PG
+    type: postgres
+    uid: telemetry-pg
+    url: host.docker.internal:5432
+    database: postgres
+    user: postgres
+    jsonData:
+      sslmode: disable
+      postgresVersion: 1500
+      timescaledb: false
+    secureJsonData:
+      password: boluo123

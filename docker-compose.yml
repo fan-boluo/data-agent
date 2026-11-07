@@ -17,6 +17,8 @@ volumes:
   redis_data:        # Redis 持久化数据
   qdrant_data:       # Qdrant 向量数据
   codegenx_data:     # 后端运行时数据（看板 JSON、会话快照、聊天记录）
+  prometheus_data:   # Prometheus TSDB（监控 profile）
+  grafana_data:      # Grafana 看板与用户配置（监控 profile）
 
 services:
   # ═══════════════════════════════════════════════════════════
@@ -175,5 +177,86 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - codegenx-net
+
+  # ═══════════════════════════════════════════════════════════
+  # ⑦ 监控栈（可选，不影响正常启停）
+  #    启动：docker compose --profile monitoring up -d
+  #    链路：backend /metrics → Prometheus → Grafana 看板
+  #                                └─ 规则 → Alertmanager → alert-sink
+  #    后端跑在宿主机时：BACKEND_TARGET=host.docker.internal:8456
+  # ═══════════════════════════════════════════════════════════
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: codegenx-prometheus
+    restart: unless-stopped
+    profiles: ["monitoring"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # 宿主机后端被抓取时用
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        sed "s|__BACKEND_TARGET__|${BACKEND_TARGET:-backend:8456}|g" \
+          /etc/prometheus/prometheus.yml.tpl > /tmp/prometheus.yml
+        exec /bin/prometheus \
+          --config.file=/tmp/prometheus.yml \
+          --storage.tsdb.path=/prometheus \
+          --storage.tsdb.retention.time=15d \
+          --web.enable-lifecycle
+    volumes:
+      - ./infra/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml.tpl:ro
+      - ./infra/monitoring/prometheus_alerts.yml:/etc/prometheus/prometheus_alerts.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    networks:
+      - codegenx-net
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: codegenx-alertmanager
+    restart: unless-stopped
+    profiles: ["monitoring"]
+    volumes:
+      - ./infra/monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    ports:
+      - "${ALERTMANAGER_PORT:-9093}:9093"
+    networks:
+      - codegenx-net
+
+  # 本地告警接收端：把 Alertmanager webhook 打印到容器日志，便于验证通知链路
+  alert-sink:
+    image: python:3.12-alpine
+    container_name: codegenx-alert-sink
+    restart: unless-stopped
+    profiles: ["monitoring"]
+    command: ["python", "/app/alert_sink.py"]
+    volumes:
+      - ./infra/monitoring/alert_sink.py:/app/alert_sink.py:ro
+    ports:
+      - "${ALERT_SINK_PORT:-9000}:9000"
+    networks:
+      - codegenx-net
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: codegenx-grafana
+    restart: unless-stopped
+    profiles: ["monitoring"]
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+    volumes:
+      - ./infra/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    depends_on:
+      - prometheus
     networks:
       - codegenx-net

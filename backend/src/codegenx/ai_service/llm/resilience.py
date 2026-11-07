@@ -150,8 +150,17 @@ class CircuitBreaker:
         recovery_timeout: float,
         half_open_max_calls: int,
         half_open_success_rate: float,
+        *,
+        metric_prefix: str = "llm",
+        metric_label: str = "circuit",
+        log_tag: str = "llm_breaker",
     ) -> None:
-        self.key = key  # "provider:model"
+        # 通用熔断器：模型级 key="provider:model"，工具级 key=tool_name；
+        # 指标名/标签/日志前缀可注入，复用同一个状态机而不复制实现
+        self.key = key
+        self._metric_prefix = metric_prefix
+        self._metric_label = metric_label
+        self._log_tag = log_tag
         self._failure_threshold = max(1, failure_threshold)
         # 下限 0.01：防 0/负值导致立即重开；生产配置 30s，测试可用小值
         self._recovery_timeout = max(0.01, recovery_timeout)
@@ -164,6 +173,12 @@ class CircuitBreaker:
         self._half_calls = 0
         self._half_success = 0
         self._half_total = 0
+        # 创建即上报初始状态：未发生迁移前 metrics/看板就能看到该熔断器（预热）
+        _set_gauge(
+            f"{self._metric_prefix}_circuit_state",
+            self._STATE_CODE[self._state],
+            **{self._metric_label: self.key},
+        )
 
     @property
     def state(self) -> str:
@@ -226,14 +241,18 @@ class CircuitBreaker:
         if state == "open":
             self._opened_at = time.monotonic()
             self._consecutive_failures = 0
-            log.warning("[llm_breaker] {} OPEN（连续失败或探测失败）", self.key)
-            _inc("llm_breaker_opens_total", circuit=self.key)
+            log.warning("[{}] {} OPEN（连续失败或探测失败）", self._log_tag, self.key)
+            _inc(f"{self._metric_prefix}_breaker_opens_total", **{self._metric_label: self.key})
         elif state == "closed":
-            log.info("[llm_breaker] {} CLOSED（探测恢复）", self.key)
+            log.info("[{}] {} CLOSED（探测恢复）", self._log_tag, self.key)
         elif state == "half_open":
-            log.info("[llm_breaker] {} HALF_OPEN（冷却结束，放行探测）", self.key)
+            log.info("[{}] {} HALF_OPEN（冷却结束，放行探测）", self._log_tag, self.key)
         self._half_calls = self._half_success = self._half_total = 0
-        _set_gauge("llm_circuit_state", self._STATE_CODE[state], circuit=self.key)
+        _set_gauge(
+            f"{self._metric_prefix}_circuit_state",
+            self._STATE_CODE[state],
+            **{self._metric_label: self.key},
+        )
 
 
 _breakers: Dict[str, CircuitBreaker] = {}
@@ -254,8 +273,6 @@ def get_breaker(model_name: str) -> CircuitBreaker:
             half_open_success_rate=cfg.breaker_half_open_success_rate,
         )
         _breakers[key] = breaker
-        # 新建即上报初始状态：预热阶段 metrics 就能看到全部熔断器（而非等首次状态迁移）
-        _set_gauge("llm_circuit_state", breaker.state_code, circuit=key)
         log.info("[llm_breaker] {} 已创建 state={}", key, breaker.state)
     return breaker
 

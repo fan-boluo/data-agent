@@ -66,11 +66,16 @@ async def run_forward_sync_batch(batch_limit: int = _FORWARD_BATCH) -> int:
 
     try:
         vectors = await get_embedding_client().embed_texts([e.inject_text() for e in entries])
+    except Exception:
+        metrics.inc_vector_sync_fail()
+        metrics.inc_degrade("embedding")
+        raise  # embedding 失败：不标记，下一轮重试
+    try:
         await upsert_points(entries, vectors)
         await mark_vector_synced([e.id for e in entries])
     except Exception:
-        metrics.inc_vector_sync_fail()
         metrics.inc_degrade("qdrant")
+        metrics.inc_vector_sync_fail()
         raise
     log.debug("[vector_sync] 批次推送 {} 个点位（队列余量≈{}）", len(entries),
               max(0, pending_total - len(entries)))
