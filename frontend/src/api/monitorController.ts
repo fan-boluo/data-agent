@@ -7,6 +7,26 @@ export async function getMonitorOverview(options?: { [key: string]: any }) {
   })
 }
 
+export async function getSessionPool(options?: { [key: string]: any }) {
+  return request('/api/stats/admin/monitor/pool', {
+    method: 'GET',
+    ...(options || {}),
+  })
+}
+
+export async function listAllSessions(
+  params?: Record<string, unknown>,
+  options?: { [key: string]: any }
+) {
+  return request('/api/stats/admin/monitor/sessions/all', {
+    method: 'GET',
+    params: {
+      ...(params || {}),
+    },
+    ...(options || {}),
+  })
+}
+
 export async function listMonitorSessions(
   params?: Record<string, unknown>,
   options?: { [key: string]: any }
@@ -33,6 +53,17 @@ export async function getMonitorTurnDetail(
   options?: { [key: string]: any }
 ) {
   return request(`/api/stats/admin/monitor/sessions/${sessionId}/turns/${turnId}`, {
+    method: 'GET',
+    ...(options || {}),
+  })
+}
+
+export async function getMonitorTurnSpans(
+  sessionId: string,
+  turnId: string,
+  options?: { [key: string]: any }
+) {
+  return request(`/api/stats/admin/monitor/sessions/${sessionId}/turns/${turnId}/spans`, {
     method: 'GET',
     ...(options || {}),
   })

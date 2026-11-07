@@ -5,7 +5,7 @@ const router = createRouter({
   routes: [
     {
       path: '/',
-      name: '首页',
+      name: '我的项目',
       component: () => import('@/pages/HomePage.vue'),
     },
     {
@@ -30,7 +30,7 @@ const router = createRouter({
     },
     {
       path: '/admin/monitor',
-      name: '监控中心',
+      name: '运行追踪',
       component: () => import('@/pages/admin/MonitorManagePage.vue'),
     },
     {

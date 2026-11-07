@@ -1,5 +1,5 @@
 <template>
-  <div id="appManagePage">
+  <div id="appManagePage" class="page-shell">
     <a-form layout="inline" :model="searchParams" @finish="doSearch">
       <a-form-item label="项目名称">
         <a-input v-model:value="searchParams.appName" placeholder="输入项目名称" />
@@ -109,9 +109,9 @@
             </div>
             <a-spin :spinning="memberLoading">
               <div v-if="members.length" class="member-chips">
-                <span v-for="m in members" :key="m.userId" class="member-chip">
+                <span v-for="m in members" :key="m.userId ?? m.userAccount ?? ''" class="member-chip">
                   {{ m.userName || m.userAccount || m.userId }}
-                  <a-popconfirm title="确定移除该成员？" @confirm="handleRemoveMember(m.userId)">
+                  <a-popconfirm title="确定移除该成员？" @confirm="handleRemoveMember(m.userId ?? undefined)">
                     <CloseOutlined class="chip-remove" />
                   </a-popconfirm>
                 </span>
@@ -156,7 +156,7 @@ const columns = [
   { title: '项目库', dataIndex: 'dbName', width: 150 },
   { title: '创建者', dataIndex: 'owner', width: 120 },
   { title: '创建时间', dataIndex: 'createTime', width: 160 },
-  { title: '操作', key: 'action', width: 220, fixed: 'right' },
+  { title: '操作', key: 'action', width: 130, fixed: 'right' },
 ]
 
 const data = ref<API.AppVO[]>([])
@@ -393,9 +393,7 @@ const deleteApp = async (id: string | undefined) => {
 </script>
 
 <style scoped>
-#appManagePage {
-  padding: 24px;
-}
+/* 页边距统一由全局 .page-shell 模板类提供（styles/theme.css） */
 
 .text-muted {
   color: var(--text-muted);

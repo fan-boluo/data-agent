@@ -1,9 +1,8 @@
 <template>
   <a-layout class="basic-layout">
     <div class="layout-bg-decor" />
-    <GlobalHeader />
-    <ChatTabsBar />
-    <a-layout-content class="main-content">
+    <GlobalHeader>
+      <a-layout-content class="main-content">
       <!-- 聊天工作区：常驻多实例，实例不随路由销毁（v-show 切换），只有关页签才卸载 -->
       <div v-show="isChatRoute" class="chat-workspace">
         <template v-for="chat in openedChatsStore.chats" :key="chat.appId">
@@ -27,6 +26,7 @@
         <component :is="Component" v-if="!isChatRoute" />
       </router-view>
     </a-layout-content>
+    </GlobalHeader>
   </a-layout>
 </template>
 
@@ -35,7 +35,6 @@ import { computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
 import GlobalHeader from '@/components/GlobalHeader.vue'
-import ChatTabsBar from '@/components/ChatTabsBar.vue'
 import AppChatPage from '@/pages/app/AppChatPage.vue'
 import { useLoginUserStore } from '@/stores/loginUser'
 import { useOpenedChatsStore } from '@/stores/openedChats'
@@ -82,10 +81,6 @@ watch(
   background: var(--bg-page);
   position: relative;
   overflow: hidden;
-}
-
-.basic-layout :deep(.global-header) {
-  flex-shrink: 0;
 }
 
 .layout-bg-decor {

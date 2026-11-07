@@ -216,6 +216,123 @@ async def internal_get_monitor_overview():
         raise BusinessException(ErrorCode.SYSTEM_ERROR, str(exc)) from exc
 
 
+@monitor_router.get("/monitor/pool")
+async def internal_get_session_pool():
+    """当前 SessionPool 概览：状态分布 + 会话明细（运行追踪页数据源）。"""
+    try:
+        pool = get_app().session_pool
+        sessions = await pool.snapshot()
+        stats = {
+            "totalSessions": len(sessions),
+            "runningSessions": sum(1 for item in sessions if item["status"] == "running"),
+            "idleSessions": sum(1 for item in sessions if item["status"] == "idle"),
+            "closedSessions": sum(1 for item in sessions if item["status"] == "closed"),
+            "maxSessions": pool.max_sessions,
+        }
+        return success({"stats": stats, "sessions": sessions})
+    except BusinessException:
+        raise
+    except Exception as exc:
+        log.exception("monitor session pool failed")
+        raise BusinessException(ErrorCode.SYSTEM_ERROR, str(exc)) from exc
+
+
+@monitor_router.get("/monitor/sessions/all")
+async def internal_list_all_sessions(
+    page_num: int = Query(default=1, alias="pageNum"),
+    page_size: int = Query(default=10, alias="pageSize"),
+    status: str | None = None,
+    app_id: str | None = Query(default=None, alias="appId"),
+    user_id: str | None = Query(default=None, alias="userId"),
+    session_id: str | None = Query(default=None, alias="sessionId"),
+):
+    """全量会话检索：池内会话 + 历史会话合并；不在池中的统一标记为 closed。
+
+    管理端展示上限 2000 条，避免一次扫全表；超出部分后续可改游标分页。
+    """
+    try:
+        pool_rows = await get_app().session_pool.snapshot()
+        pool_map = {row["sessionId"]: row for row in pool_rows}
+
+        history = await get_monitor_query_service().list_sessions(
+            MonitorSessionQueryRequest(
+                pageNum=1,
+                pageSize=2000,
+                appId=app_id,
+                userId=user_id,
+                sessionId=session_id,
+            )
+        )
+        merged: dict[str, dict] = {}
+        for rec in history.records:
+            # API 出参为 camelCase 别名，模型内部属性仍是 snake_case
+            pool_row = pool_map.get(rec.session_id) or {}
+            in_pool = rec.session_id in pool_map
+            merged[rec.session_id] = {
+                "sessionId": rec.session_id,
+                "appId": rec.app_id,
+                "userId": rec.user_id,
+                "status": pool_row.get("status", "idle") if in_pool else "closed",
+                "inPool": in_pool,
+                "totalTurns": rec.total_turns,
+                "messageCount": pool_row.get("messageCount", 0),
+                "lastActivityAt": pool_row.get("lastActivityAt")
+                or (rec.updated_at.isoformat() if rec.updated_at else None),
+                "idleSeconds": pool_row.get("idleSeconds", 0),
+                "pendingRequests": pool_row.get("pendingRequests", 0),
+            }
+        # 池内但尚无 trace 的会话也要能看到
+        for sid, pool_row in pool_map.items():
+            if sid in merged:
+                continue
+            merged[sid] = {
+                "sessionId": sid,
+                "appId": pool_row.get("appId", ""),
+                "userId": pool_row.get("userId", ""),
+                "status": pool_row.get("status", "idle"),
+                "inPool": True,
+                "totalTurns": 0,
+                "messageCount": pool_row.get("messageCount", 0),
+                "lastActivityAt": pool_row.get("lastActivityAt"),
+                "idleSeconds": pool_row.get("idleSeconds", 0),
+                "pendingRequests": pool_row.get("pendingRequests", 0),
+            }
+
+        rows = list(merged.values())
+        if app_id:
+            rows = [r for r in rows if app_id in r["appId"]]
+        if user_id:
+            rows = [r for r in rows if user_id in r["userId"]]
+        if session_id:
+            rows = [r for r in rows if session_id in r["sessionId"]]
+        if status:
+            rows = [r for r in rows if r["status"] == status]
+
+        # 先按活跃时间倒序，再按状态分组（running → idle → closed）
+        rows.sort(key=lambda r: str(r["lastActivityAt"] or ""), reverse=True)
+        priority = {"running": 0, "idle": 1, "closed": 2}
+        rows.sort(key=lambda r: priority.get(r["status"], 3))
+
+        page_size = max(1, min(int(page_size), 100))
+        page_num = max(1, int(page_num))
+        total_row = len(rows)
+        start = (page_num - 1) * page_size
+        return success(
+            {
+                "records": rows[start : start + page_size],
+                "pageNumber": page_num,
+                "pageSize": page_size,
+                "totalPage": (total_row + page_size - 1) // page_size,
+                "totalRow": total_row,
+            }
+        )
+    except BusinessException:
+        raise
+    except Exception as exc:
+        log.exception("monitor list all sessions failed")
+        raise BusinessException(ErrorCode.SYSTEM_ERROR, str(exc)) from exc
+
+
 @monitor_router.get("/monitor/sessions")
 async def internal_list_monitor_sessions(
     page_num: int = Query(default=1, alias="pageNum"),

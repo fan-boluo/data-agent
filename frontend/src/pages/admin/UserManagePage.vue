@@ -1,5 +1,5 @@
 <template>
-  <div id="userManagePage">
+  <div id="userManagePage" class="page-shell">
     <a-form layout="inline" :model="searchParams" @finish="doSearch">
       <a-form-item label="账号">
         <a-input v-model:value="searchParams.userAccount" placeholder="输入账号" />
@@ -113,7 +113,5 @@ onMounted(() => {
 </script>
 
 <style scoped>
-#userManagePage {
-  padding: 24px;
-}
+/* 页边距统一由全局 .page-shell 模板类提供（styles/theme.css） */
 </style>

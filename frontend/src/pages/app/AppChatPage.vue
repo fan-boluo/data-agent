@@ -712,7 +712,7 @@ const editorOptions = computed(() => ({
   padding: { top: 8 },
 }))
 
-const onResizeStart = (target: 'sidebar' | 'chat' | 'output', e: MouseEvent) => {
+const onResizeStart = (target: 'sidebar' | 'chat' | 'output' | 'input', e: MouseEvent) => {
   resizing.value = target
   document.addEventListener('mousemove', onResizeMove)
   document.addEventListener('mouseup', onResizeEnd)
@@ -963,10 +963,11 @@ const openFileInTab = async (filePath: string, fileName: string) => {
   }
 
   if (fileTabs.value.length >= MAX_OPEN_TABS) {
-    let oldest = fileTabs.value[0]
+    let oldest = fileTabs.value[0]!
     for (let i = 1; i < fileTabs.value.length; i++) {
-      if (fileTabs.value[i].lastAccessed < oldest.lastAccessed) {
-        oldest = fileTabs.value[i]
+      const t = fileTabs.value[i]!
+      if (t.lastAccessed < oldest.lastAccessed) {
+        oldest = t
       }
     }
     if (oldest.isDirty) {
@@ -1012,7 +1013,8 @@ const openFileInTab = async (filePath: string, fileName: string) => {
     // Force Vue to detect object property change by replacing the entire object
     const idx = fileTabs.value.findIndex(t => t.path === filePath)
     if (idx >= 0) {
-      fileTabs.value[idx] = { ...fileTabs.value[idx] }
+      const cur = fileTabs.value[idx]
+      if (cur) fileTabs.value[idx] = { ...cur }
       console.log(`[FileLoad] Replaced object at index ${idx}`)
     }
     await nextTick()
@@ -1035,6 +1037,7 @@ const closeFileTab = (path: string) => {
   if (idx === -1) return
 
   const tab = fileTabs.value[idx]
+  if (!tab) return
   // Abort in-flight load if any
   if (tab.abortController) {
     try { tab.abortController.abort() } catch (e) { console.warn('abort failed', e) }
@@ -1059,7 +1062,7 @@ const doCloseTab = (idx: number, path: string) => {
 
   if (activeFileTab.value === path) {
     if (fileTabs.value.length > 0) {
-      let mostRecent = fileTabs.value[0]
+      let mostRecent = fileTabs.value[0]!
       for (const t of fileTabs.value) {
         if (t.lastAccessed > mostRecent.lastAccessed) {
           mostRecent = t
@@ -1268,7 +1271,7 @@ const doRename = async () => {
       if (oldTabIdx >= 0) {
         fileTabs.value.splice(oldTabIdx, 1)
         if (activeFileTab.value === node.key) {
-          activeFileTab.value = fileTabs.value.length > 0 ? fileTabs.value[Math.min(oldTabIdx, fileTabs.value.length - 1)].path : ''
+          activeFileTab.value = fileTabs.value.length > 0 ? fileTabs.value[Math.min(oldTabIdx, fileTabs.value.length - 1)]!.path : ''
         }
       }
       selectedFileNode.value = null
@@ -1361,7 +1364,7 @@ const deleteSelectedNode = () => {
             return true
           })
           if (activeFileTab.value && !fileTabs.value.find(t => t.path === activeFileTab.value)) {
-            activeFileTab.value = fileTabs.value.length > 0 ? fileTabs.value[fileTabs.value.length - 1].path : ''
+            activeFileTab.value = fileTabs.value.length > 0 ? fileTabs.value[fileTabs.value.length - 1]!.path : ''
           }
 
           selectedFileNode.value = null
@@ -1522,7 +1525,7 @@ const loadLatestSessionMessages = async () => {
     const result = await sessionsRes.json()
     const sessions: SessionListItem[] = result.data || []
     if (!sessions.length) return
-    const latestSessionId = sessions[0].session_id
+    const latestSessionId = sessions[0]!.session_id
     // 有历史会话则加载消息
     await loadSession(latestSessionId)
   } catch (e) {
@@ -1595,13 +1598,12 @@ const genTraceStepId = () => `${Date.now()}-${Math.random().toString(16).slice(2
 
 // 新增一个 running/completed 的分析步骤
 const addTraceStep = (partial: Partial<AnalysisStep> & { type: AnalysisStep['type']; title: string }) => {
-  const step: AnalysisStep = {
-    id: genTraceStepId(),
-    type: partial.type,
-    title: partial.title,
+  // id 放在展开之后，保证必生成分配；type/title 由入参约束必填
+  const step = {
     status: 'running',
     timestamp: Date.now(),
     ...partial,
+    id: genTraceStepId(),
   } as AnalysisStep
   activeAnalysisTrace.value.push(step)
   return step
@@ -1611,8 +1613,9 @@ const addTraceStep = (partial: Partial<AnalysisStep> & { type: AnalysisStep['typ
 const updateLastRunningTraceStep = (type: AnalysisStep['type'], patch: Partial<AnalysisStep>) => {
   const list = activeAnalysisTrace.value
   for (let i = list.length - 1; i >= 0; i--) {
-    if (list[i].type === type && list[i].status === 'running') {
-      list[i] = { ...list[i], ...patch, status: patch.status ?? 'completed' }
+    const cur = list[i]
+    if (cur && cur.type === type && cur.status === 'running') {
+      list[i] = { ...cur, ...patch, status: patch.status ?? 'completed' }
       return list[i]
     }
   }
@@ -1678,11 +1681,14 @@ const appendAiStep = (step: AiStep) => {
 const updateLastRunningToolStep = (detail: string, state: AiStep['state'], toolId?: string) => {
   const targetMessage = getMessageAt(activeGenerationMessageIndex.value ?? -1)
   if (!targetMessage?.steps) return
-  for (let i = targetMessage.steps.length - 1; i >= 0; i--) {
-    if (targetMessage.steps[i].eventType === 'ToolExecutionStart' && targetMessage.steps[i].state === 'running') {
-      if (toolId && targetMessage.steps[i].toolId && targetMessage.steps[i].toolId !== toolId) continue
-      targetMessage.steps[i].state = state
-      targetMessage.steps[i].detail = detail
+  const steps = targetMessage.steps
+  for (let i = steps.length - 1; i >= 0; i--) {
+    const s = steps[i]
+    if (!s) continue
+    if (s.eventType === 'ToolExecutionStart' && s.state === 'running') {
+      if (toolId && s.toolId && s.toolId !== toolId) continue
+      s.state = state
+      s.detail = detail
       scrollToBottom()
       return
     }
@@ -1899,7 +1905,7 @@ const fetchAppInfo = async () => {
   if (!id) return
   appId.value = id; ensureChatSessionId(id)
   try {
-    const res = await getAppVoById({ id: id as unknown as number })
+    const res = await getAppVoById({ id })
     if (res.data.code === 0 && res.data.data) {
       appInfo.value = res.data.data
       // 同步页签名称

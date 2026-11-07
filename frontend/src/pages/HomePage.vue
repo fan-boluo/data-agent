@@ -122,7 +122,7 @@ const enterChat = (appId?: string | null, appName?: string) => {
 
 const goToChat = (appId?: string | null) => {
   const app = apps.value.find((a) => String(a.id) === String(appId))
-  enterChat(appId, app?.appName)
+  enterChat(appId ?? undefined, app?.appName ?? undefined)
 }
 
 watch(

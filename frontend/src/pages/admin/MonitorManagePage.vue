@@ -1,5 +1,13 @@
 <template>
-  <div id="monitorManagePage">
+  <div id="monitorManagePage" class="page-shell">
+    <div class="page-header">
+      <div class="subtle-text">当前会话池概览与单会话 Trace 排障；运行态势与告警见 Grafana</div>
+      <a-space>
+        <a-button :loading="poolLoading || sessionLoading" @click="refreshAll">刷新</a-button>
+        <a-button @click="openGrafana">打开 Grafana 面板</a-button>
+      </a-space>
+    </div>
+
     <a-row :gutter="16" class="summary-row">
       <a-col v-for="item in summaryCards" :key="item.label" :xs="24" :sm="12" :xl="6">
         <a-card>
@@ -8,60 +16,30 @@
       </a-col>
     </a-row>
 
-    <a-row :gutter="16" class="summary-row">
-      <a-col :span="24">
-        <a-card title="运维操作" class="panel-card">
-          <a-form layout="inline" :model="cleanupForm" @finish="runCleanup">
-            <a-form-item label="保留天数">
-              <a-input-number v-model:value="cleanupForm.retentionDays" :min="1" :max="3650" />
-            </a-form-item>
-            <a-form-item label="Dry Run">
-              <a-switch v-model:checked="cleanupForm.dryRun" />
-            </a-form-item>
-            <a-form-item>
-              <a-button type="primary" html-type="submit" :loading="cleanupLoading">执行清理</a-button>
-            </a-form-item>
-          </a-form>
-          <div class="cleanup-hint subtle-text">兼容 exporter: /stats/admin/monitor/metrics</div>
-          <div v-if="cleanupResult" class="cleanup-result">
-            <a-tag :color="cleanupResult.status === 'success' ? 'green' : 'orange'">
-              {{ cleanupResult.status }}
-            </a-tag>
-            <span>
-              {{ cleanupResult.dryRun ? '预计清理' : '已清理' }} {{ cleanupResult.deletedRows }} 条，保留 {{ cleanupResult.retentionDays }} 天
-            </span>
-            <div class="tag-list cleanup-table-tags">
-              <a-tag
-                v-for="item in cleanupResult.tableResults"
-                :key="item.tableName"
-                :color="item.status === 'success' ? 'blue' : 'red'"
-              >
-                {{ item.tableName }}: {{ item.status === 'success' ? item.affectedRows : item.errorMessage }}
-              </a-tag>
-            </div>
-          </div>
-        </a-card>
-      </a-col>
-    </a-row>
-
-    <a-card title="会话检索" class="panel-card">
-      <a-form layout="inline" :model="sessionQuery" @finish="doSessionSearch">
-        <a-form-item label="会话ID">
-          <a-input v-model:value="sessionQuery.sessionId" placeholder="输入 sessionId" />
+    <a-card class="panel-card">
+      <template #title>会话检索</template>
+      <a-form layout="inline" :model="sessionQuery" class="search-form">
+        <a-form-item label="Session">
+          <a-input v-model:value="sessionQuery.sessionId" placeholder="输入 sessionId" allow-clear />
         </a-form-item>
-        <a-form-item label="用户ID">
-          <a-input v-model:value="sessionQuery.userId" placeholder="输入 userId" />
+        <a-form-item label="用户">
+          <a-input v-model:value="sessionQuery.userId" placeholder="输入 userId" allow-clear />
+        </a-form-item>
+        <a-form-item label="应用">
+          <a-input v-model:value="sessionQuery.appId" placeholder="输入 appId" allow-clear />
         </a-form-item>
         <a-form-item label="状态">
           <a-select v-model:value="sessionQuery.status" allow-clear style="width: 140px" placeholder="全部状态">
-            <a-select-option value="running">running</a-select-option>
-            <a-select-option value="success">success</a-select-option>
-            <a-select-option value="error">error</a-select-option>
-            <a-select-option value="stopped">stopped</a-select-option>
+            <a-select-option value="running">运行中</a-select-option>
+            <a-select-option value="idle">空闲</a-select-option>
+            <a-select-option value="closed">已关闭</a-select-option>
           </a-select>
         </a-form-item>
         <a-form-item>
-          <a-button type="primary" html-type="submit">搜索</a-button>
+          <a-space>
+            <a-button type="primary" @click="doSessionSearch">搜索</a-button>
+            <a-button @click="resetSessionSearch">重置</a-button>
+          </a-space>
         </a-form-item>
       </a-form>
       <a-divider />
@@ -71,202 +49,121 @@
         :columns="sessionColumns"
         :data-source="sessionPage.records"
         :pagination="sessionPagination"
-        :scroll="{ x: 1400 }"
+        :scroll="{ x: 1000 }"
         @change="onSessionTableChange"
       >
         <template #bodyCell="{ column, record }">
           <template v-if="column.dataIndex === 'status'">
-            <a-tag :color="statusColor(record.status)">{{ record.status }}</a-tag>
+            <a-tag :color="poolStatusColor(record.status)">{{ statusLabel(record.status) }}</a-tag>
           </template>
-          <template v-else-if="column.dataIndex === 'startedAt'">
-            <div>{{ formatTime(record.startedAt) }}</div>
-            <div class="subtle-text">{{ formatRelativeTime(record.startedAt) }}</div>
+          <template v-else-if="column.dataIndex === 'lastActivityAt'">
+            {{ formatRelativeTime(record.lastActivityAt) }}
           </template>
-          <template v-else-if="column.dataIndex === 'avgLlmLatencyMs'">
-            {{ formatMs(record.avgLlmLatencyMs) }}
+          <template v-else-if="column.dataIndex === 'idleSeconds'">
+            {{ record.inPool ? formatIdle(record.idleSeconds) : '-' }}
           </template>
-          <template v-else-if="column.dataIndex === 'durationMs'">
-            {{ formatMs(record.durationMs) }}
-          </template>
-          <template v-else-if="column.key === 'action'">
-            <a-button type="link" @click="openSessionDetail(record.sessionId)">查看详情</a-button>
+          <template v-else-if="column.dataIndex === 'action'">
+            <a-button type="link" size="small" @click="openSessionDetail(record)">查看详情</a-button>
           </template>
         </template>
       </a-table>
     </a-card>
 
-    <a-card title="告警列表" class="panel-card">
-      <a-form layout="inline" :model="alertQuery" @finish="doAlertSearch">
-        <a-form-item label="规则">
-          <a-input v-model:value="alertQuery.ruleName" placeholder="输入 ruleName" />
-        </a-form-item>
-        <a-form-item label="Session">
-          <a-input v-model:value="alertQuery.sessionId" placeholder="输入 sessionId" />
-        </a-form-item>
-        <a-form-item label="状态">
-          <a-select v-model:value="alertQuery.status" allow-clear style="width: 140px" placeholder="全部状态">
-            <a-select-option value="open">open</a-select-option>
-            <a-select-option value="resolved">resolved</a-select-option>
-          </a-select>
-        </a-form-item>
-        <a-form-item>
-          <a-button type="primary" html-type="submit">搜索</a-button>
-        </a-form-item>
-      </a-form>
-      <a-divider />
-      <a-table
-        row-key="id"
-        :loading="alertLoading"
-        :columns="alertColumns"
-        :data-source="alertPage.records"
-        :pagination="alertPagination"
-        :scroll="{ x: 1200 }"
-        @change="onAlertTableChange"
-      >
-        <template #bodyCell="{ column, record }">
-          <template v-if="column.dataIndex === 'status'">
-            <a-tag :color="record.status === 'open' ? 'red' : 'green'">{{ record.status }}</a-tag>
-          </template>
-          <template v-else-if="column.dataIndex === 'level'">
-            <a-tag :color="record.level === 'ERROR' ? 'red' : 'orange'">{{ record.level }}</a-tag>
-          </template>
-          <template v-else-if="column.dataIndex === 'triggeredAt'">
-            {{ formatTime(record.triggeredAt) }}
-          </template>
-          <template v-else-if="column.dataIndex === 'resolvedAt'">
-            {{ formatTime(record.resolvedAt) }}
-          </template>
-        </template>
-      </a-table>
-    </a-card>
-
-    <a-card title="告警配置" class="panel-card">
-      <a-descriptions bordered :column="1" size="small">
-        <a-descriptions-item label="Redis 实时窗口">
-          {{ monitorConfig?.storage.useRedisWindows ? '开启' : '关闭' }}
-        </a-descriptions-item>
-        <a-descriptions-item label="LLM 最近窗口">
-          {{ configSummary('llmAvgLatencyLast5') }}
-        </a-descriptions-item>
-        <a-descriptions-item label="单次 LLM 超时">
-          {{ configSummary('llmSingleTimeout') }}
-        </a-descriptions-item>
-        <a-descriptions-item label="Token 配额使用率">
-          {{ configSummary('tokenQuotaUsage') }}
-        </a-descriptions-item>
-        <a-descriptions-item label="工具连续失败">
-          {{ configSummary('toolConsecutiveFailures') }}
-        </a-descriptions-item>
-        <a-descriptions-item label="Session 最大轮数">
-          {{ configSummary('sessionMaxTurns') }}
-        </a-descriptions-item>
-      </a-descriptions>
-    </a-card>
-
-    <a-drawer v-model:open="sessionDrawerOpen" width="1080" title="Session 详情">
-      <template v-if="selectedSessionDetail">
+    <a-drawer v-model:open="sessionDrawerOpen" title="Session 详情" width="760" destroy-on-close>
+      <template v-if="selectedPoolSession">
         <a-descriptions bordered :column="2" size="small">
-          <a-descriptions-item label="Session ID">{{ selectedSessionDetail.session.sessionId }}</a-descriptions-item>
-          <a-descriptions-item label="Trace ID">{{ selectedSessionDetail.session.traceId }}</a-descriptions-item>
-          <a-descriptions-item label="状态">
-            <a-tag :color="statusColor(selectedSessionDetail.session.status)">
-              {{ selectedSessionDetail.session.status }}
-            </a-tag>
+          <a-descriptions-item label="Session ID" :span="2">{{ selectedPoolSession.sessionId }}</a-descriptions-item>
+          <a-descriptions-item label="池状态">
+            <a-tag :color="poolStatusColor(selectedPoolSession.status)">{{ statusLabel(selectedPoolSession.status) }}</a-tag>
           </a-descriptions-item>
-          <a-descriptions-item label="模型">{{ selectedSessionDetail.session.model || '-' }}</a-descriptions-item>
-          <a-descriptions-item label="总轮次">{{ selectedSessionDetail.session.totalTurns }}</a-descriptions-item>
-          <a-descriptions-item label="总 Tool 调用">{{ selectedSessionDetail.session.totalToolCalls }}</a-descriptions-item>
-          <a-descriptions-item label="平均 LLM 延迟">{{ formatMs(selectedSessionDetail.session.avgLlmLatencyMs) }}</a-descriptions-item>
-          <a-descriptions-item label="平均首包延迟">{{ formatMs(selectedSessionDetail.session.avgFirstTokenMs) }}</a-descriptions-item>
-          <a-descriptions-item label="总 Prompt Tokens">{{ selectedSessionDetail.session.totalPromptTokens }}</a-descriptions-item>
-          <a-descriptions-item label="总 Completion Tokens">{{ selectedSessionDetail.session.totalCompletionTokens }}</a-descriptions-item>
-          <a-descriptions-item label="开始时间">{{ formatTime(selectedSessionDetail.session.startedAt) }}</a-descriptions-item>
-          <a-descriptions-item label="结束时间">{{ formatTime(selectedSessionDetail.session.endedAt) }}</a-descriptions-item>
+          <a-descriptions-item label="应用">{{ selectedPoolSession.appId || '-' }}</a-descriptions-item>
+          <a-descriptions-item label="用户">{{ selectedPoolSession.userId || '-' }}</a-descriptions-item>
+          <a-descriptions-item label="轮次">{{ selectedPoolSession.totalTurns }}</a-descriptions-item>
+          <a-descriptions-item label="最后活跃">{{ formatRelativeTime(selectedPoolSession.lastActivityAt) }}</a-descriptions-item>
+          <a-descriptions-item label="待处理请求">
+            {{ selectedPoolSession.inPool ? selectedPoolSession.pendingRequests : '-' }}
+          </a-descriptions-item>
         </a-descriptions>
 
-        <a-divider>Turn 延迟折线图</a-divider>
-        <div class="chart-card">
-          <svg viewBox="0 0 640 200" class="latency-chart" preserveAspectRatio="none">
-            <line x1="24" y1="176" x2="616" y2="176" class="axis-line" />
-            <line x1="24" y1="24" x2="24" y2="176" class="axis-line" />
-            <polyline :points="latencyChartPoints" class="chart-line" fill="none" />
-            <circle
-              v-for="point in latencyChartDots"
-              :key="point.key"
-              :cx="point.x"
-              :cy="point.y"
-              r="4"
-              class="chart-dot"
-            />
-          </svg>
-          <div class="chart-empty" v-if="!latencyChartDots.length">暂无 turn 延迟数据</div>
-        </div>
-
-        <a-divider>Turn 列表</a-divider>
-        <a-table
-          row-key="turnId"
-          :columns="turnColumns"
-          :data-source="selectedSessionDetail.turns"
-          :pagination="false"
-          size="small"
-          :scroll="{ x: 1000 }"
-        >
-          <template #bodyCell="{ column, record }">
-            <template v-if="column.dataIndex === 'status'">
-              <a-tag :color="statusColor(record.status)">{{ record.status }}</a-tag>
+        <a-divider>Turn 链路</a-divider>
+        <a-spin :spinning="turnLoading">
+          <a-table
+            v-if="sessionTurns.length"
+            row-key="turnId"
+            size="small"
+            :columns="turnColumns"
+            :data-source="sessionTurns"
+            :pagination="false"
+            :scroll="{ x: 720 }"
+          >
+            <template #bodyCell="{ column, record }">
+              <template v-if="column.dataIndex === 'status'">
+                <a-tag :color="turnStatusColor(record.status)">{{ record.status }}</a-tag>
+              </template>
+              <template v-else-if="column.dataIndex === 'durationMs'">{{ formatMs(record.durationMs) }}</template>
+              <template v-else-if="column.dataIndex === 'traceId'">
+                <span class="mono-text" :title="record.traceId">{{ shortTraceId(record.traceId) }}</span>
+              </template>
+              <template v-else-if="column.dataIndex === 'action'">
+                <a-button type="link" size="small" @click="openTurnSpans(record)">查看链路</a-button>
+              </template>
             </template>
-            <template v-else-if="column.dataIndex === 'llmLatencyMs'">
-              {{ formatMs(record.llmLatencyMs) }}
-            </template>
-            <template v-else-if="column.dataIndex === 'startedAt'">
-              {{ formatTime(record.startedAt) }}
-            </template>
-            <template v-else-if="column.key === 'action'">
-              <a-button type="link" @click="openTurnDetail(record.turnId)">查看明细</a-button>
-            </template>
-          </template>
-        </a-table>
-
-        <a-divider>Session 告警</a-divider>
-        <a-table row-key="id" :columns="sessionAlertColumns" :data-source="selectedSessionDetail.alerts" :pagination="false" size="small">
-          <template #bodyCell="{ column, record }">
-            <template v-if="column.dataIndex === 'status'">
-              <a-tag :color="record.status === 'open' ? 'red' : 'green'">{{ record.status }}</a-tag>
-            </template>
-            <template v-else-if="column.dataIndex === 'triggeredAt'">
-              {{ formatTime(record.triggeredAt) }}
-            </template>
-          </template>
-        </a-table>
+          </a-table>
+          <a-empty v-else description="该会话暂无 Turn 记录（可能尚未产生可观测数据）" />
+        </a-spin>
       </template>
     </a-drawer>
 
-    <a-modal v-model:open="turnModalOpen" title="Turn 详情" width="720" :footer="null">
-      <template v-if="selectedTurnDetail">
-        <a-descriptions bordered :column="2" size="small">
-          <a-descriptions-item label="Turn ID">{{ selectedTurnDetail.turnId }}</a-descriptions-item>
-          <a-descriptions-item label="状态">{{ selectedTurnDetail.status }}</a-descriptions-item>
-          <a-descriptions-item label="LLM 延迟">{{ formatMs(selectedTurnDetail.llmLatencyMs) }}</a-descriptions-item>
-          <a-descriptions-item label="首包延迟">{{ formatMs(selectedTurnDetail.firstTokenMs) }}</a-descriptions-item>
-          <a-descriptions-item label="Prompt Tokens">{{ selectedTurnDetail.promptTokens }}</a-descriptions-item>
-          <a-descriptions-item label="Completion Tokens">{{ selectedTurnDetail.completionTokens }}</a-descriptions-item>
-          <a-descriptions-item label="Context Tokens">{{ selectedTurnDetail.contextTokens }}</a-descriptions-item>
-          <a-descriptions-item label="Context Usage">{{ selectedTurnDetail.contextTokenUsage }}</a-descriptions-item>
-          <a-descriptions-item label="Memory Latency">{{ formatMs(selectedTurnDetail.memoryRetrievalMs) }}</a-descriptions-item>
+    <a-drawer v-model:open="spanDrawerOpen" title="Turn 链路" width="900" destroy-on-close>
+      <template v-if="currentTurn">
+        <a-descriptions bordered :column="3" size="small">
+          <a-descriptions-item label="Trace ID" :span="3">
+            <span class="mono-text">{{ currentTurn.traceId || '-' }}</span>
+          </a-descriptions-item>
+          <a-descriptions-item label="状态">
+            <a-tag :color="turnStatusColor(currentTurn.status)">{{ currentTurn.status }}</a-tag>
+          </a-descriptions-item>
+          <a-descriptions-item label="Turn 耗时">{{ formatMs(currentTurn.durationMs) }}</a-descriptions-item>
+          <a-descriptions-item label="错误数">{{ currentTurn.errorCount }}</a-descriptions-item>
+          <a-descriptions-item label="LLM 总耗时">{{ formatMs(currentTurn.llmLatencyMs) }}</a-descriptions-item>
+          <a-descriptions-item label="首包耗时">{{ formatMs(currentTurn.firstTokenMs) }}</a-descriptions-item>
+          <a-descriptions-item label="Span 数">{{ spanTree?.spanCount ?? 0 }}</a-descriptions-item>
         </a-descriptions>
-        <a-divider>Tool 调用明细</a-divider>
-        <a-table row-key="name" :columns="toolDetailColumns" :data-source="selectedTurnDetail.toolCallsDetail" :pagination="false" size="small">
-          <template #bodyCell="{ column, record }">
-            <template v-if="column.dataIndex === 'latencyMs'">
-              {{ formatMs(record.latencyMs) }}
-            </template>
-            <template v-else-if="column.dataIndex === 'status'">
-              <a-tag :color="statusColor(record.status)">{{ record.status }}</a-tag>
-            </template>
-          </template>
-        </a-table>
+
+        <a-divider>Span 瀑布</a-divider>
+        <a-spin :spinning="spanLoading">
+          <div v-if="spanRows.length" class="span-list">
+            <div
+              v-for="row in spanRows"
+              :key="row.spanId"
+              class="span-row"
+              :style="{ paddingLeft: `${row.depth * 18}px` }"
+            >
+              <div class="span-head">
+                <a-tag class="span-kind-tag" :color="spanKindMeta(row.opType).tagColor">
+                  {{ spanKindMeta(row.opType).label }}
+                </a-tag>
+                <span class="span-name">{{ row.name || row.opType }}</span>
+                <a-tag :color="row.status === 'error' ? 'red' : 'green'">{{ row.status }}</a-tag>
+                <span class="span-meta">{{ row.opType }} · {{ formatMs(row.durationMs) }}</span>
+              </div>
+              <div class="span-track">
+                <div
+                  class="span-bar"
+                  :style="{
+                    marginLeft: `${row.offsetPercent}%`,
+                    width: `${row.widthPercent}%`,
+                    background: row.status === 'error' ? '#ff4d4f' : spanKindMeta(row.opType).barColor,
+                  }"
+                />
+              </div>
+              <div v-if="row.error" class="span-error">{{ row.error }}</div>
+            </div>
+          </div>
+          <a-empty v-else-if="!spanLoading" description="暂无 Span 数据" />
+        </a-spin>
       </template>
-    </a-modal>
+    </a-drawer>
   </div>
 </template>
 
@@ -274,353 +171,310 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import {
-  cleanupMonitorHistory,
-  getMonitorConfig,
-  getMonitorOverview,
   getMonitorSessionDetail,
-  getMonitorTurnDetail,
-  listMonitorAlerts,
-  listMonitorSessions,
+  getMonitorTurnSpans,
+  getSessionPool,
+  listAllSessions,
 } from '@/api/monitorController'
-import { formatRelativeTime, formatTime } from '@/utils/time'
 import type {
-  MonitorAlertRecordVO,
-  MonitorCleanupSummary,
-  MonitorConfigResponse,
-  MonitorOverviewStats,
+  MergedSessionRow,
   MonitorPageData,
-  MonitorSessionDetail,
-  MonitorSessionSummary,
+  MonitorSpanNode,
+  MonitorTurnSpanTree,
   MonitorTurnSummary,
+  PoolSessionSummary,
+  SessionPoolStats,
 } from '@/types/monitor'
 
-const sessionColumns = [
-  { title: 'Session ID', dataIndex: 'sessionId', width: 220 },
-  { title: '状态', dataIndex: 'status', width: 110 },
-  { title: '用户', dataIndex: 'userId', width: 120 },
-  { title: '轮次', dataIndex: 'totalTurns', width: 90 },
-  { title: '平均 LLM 延迟', dataIndex: 'avgLlmLatencyMs', width: 140 },
-  { title: 'Tool 调用', dataIndex: 'totalToolCalls', width: 110 },
-  { title: '开始时间', dataIndex: 'startedAt', width: 180 },
-  { title: '总时长', dataIndex: 'durationMs', width: 120 },
-  { title: '操作', key: 'action', width: 120, fixed: 'right' },
-]
+const poolLoading = ref(false)
+const sessionLoading = ref(false)
+const turnLoading = ref(false)
+const spanLoading = ref(false)
 
-const alertColumns = [
-  { title: '规则', dataIndex: 'ruleName', width: 180 },
-  { title: '等级', dataIndex: 'level', width: 100 },
+const poolStats = ref<SessionPoolStats>()
+// 池内快照仅用于概览卡片统计，列表数据来自后端合并接口
+const poolSessions = ref<PoolSessionSummary[]>([])
+const selectedPoolSession = ref<MergedSessionRow>()
+const sessionTurns = ref<MonitorTurnSummary[]>([])
+
+const sessionPage = ref<MonitorPageData<MergedSessionRow>>({
+  records: [],
+  pageNumber: 1,
+  pageSize: 10,
+  totalPage: 0,
+  totalRow: 0,
+})
+const sessionPageNumber = ref(1)
+const sessionPageSize = ref(10)
+
+const sessionDrawerOpen = ref(false)
+const spanDrawerOpen = ref(false)
+const currentTurn = ref<MonitorTurnSummary>()
+const spanTree = ref<MonitorTurnSpanTree>()
+
+const sessionQuery = reactive({
+  sessionId: '',
+  userId: '',
+  appId: '',
+  status: undefined as string | undefined,
+})
+
+const sessionColumns = [
+  { title: 'Session ID', dataIndex: 'sessionId', width: 260 },
+  { title: '应用', dataIndex: 'appId', width: 120 },
+  { title: '用户', dataIndex: 'userId', width: 120 },
   { title: '状态', dataIndex: 'status', width: 100 },
-  { title: 'Session', dataIndex: 'sessionId', width: 220 },
-  { title: '观测值', dataIndex: 'observedValue', width: 100 },
-  { title: '阈值', dataIndex: 'thresholdValue', width: 100 },
-  { title: '触发时间', dataIndex: 'triggeredAt', width: 180 },
-  { title: '消息', dataIndex: 'message', width: 360 },
+  { title: '轮次', dataIndex: 'totalTurns', width: 80 },
+  { title: '空闲时长', dataIndex: 'idleSeconds', width: 110 },
+  { title: '最后活跃', dataIndex: 'lastActivityAt', width: 140 },
+  { title: '操作', dataIndex: 'action', width: 100, fixed: 'right' as const },
 ]
 
 const turnColumns = [
-  { title: 'Turn', dataIndex: 'turnNumber', width: 80 },
-  { title: '状态', dataIndex: 'status', width: 100 },
-  { title: 'LLM 延迟', dataIndex: 'llmLatencyMs', width: 120 },
-  { title: 'Tool 调用', dataIndex: 'toolCallsCount', width: 100 },
-  { title: '开始时间', dataIndex: 'startedAt', width: 180 },
-  { title: '操作', key: 'action', width: 120, fixed: 'right' },
+  { title: '轮次', dataIndex: 'turnNumber', width: 70 },
+  { title: '状态', dataIndex: 'status', width: 90 },
+  { title: '耗时', dataIndex: 'durationMs', width: 100 },
+  { title: '错误数', dataIndex: 'errorCount', width: 80 },
+  { title: 'Trace ID', dataIndex: 'traceId', width: 200 },
+  { title: '操作', dataIndex: 'action', width: 100, fixed: 'right' as const },
 ]
 
-const sessionAlertColumns = [
-  { title: '规则', dataIndex: 'ruleName', width: 160 },
-  { title: '状态', dataIndex: 'status', width: 100 },
-  { title: '观测值', dataIndex: 'observedValue', width: 100 },
-  { title: '阈值', dataIndex: 'thresholdValue', width: 100 },
-  { title: '触发时间', dataIndex: 'triggeredAt', width: 180 },
-]
-
-const toolDetailColumns = [
-  { title: 'Tool', dataIndex: 'name', width: 220 },
-  { title: '状态', dataIndex: 'status', width: 100 },
-  { title: '延迟', dataIndex: 'latencyMs', width: 120 },
-  { title: '调用次数', dataIndex: 'callCount', width: 100 },
-]
-
-const overview = ref<MonitorOverviewStats>()
-const monitorConfig = ref<MonitorConfigResponse>()
-const cleanupResult = ref<MonitorCleanupSummary>()
-const selectedSessionDetail = ref<MonitorSessionDetail>()
-const selectedTurnDetail = ref<MonitorTurnSummary>()
-const sessionDrawerOpen = ref(false)
-const turnModalOpen = ref(false)
-const cleanupLoading = ref(false)
-const sessionLoading = ref(false)
-const alertLoading = ref(false)
-
-const sessionPage = ref<MonitorPageData<MonitorSessionSummary>>({
-  records: [],
-  pageNumber: 1,
-  pageSize: 10,
-  totalPage: 0,
-  totalRow: 0,
-})
-
-const alertPage = ref<MonitorPageData<MonitorAlertRecordVO>>({
-  records: [],
-  pageNumber: 1,
-  pageSize: 10,
-  totalPage: 0,
-  totalRow: 0,
-})
-
-const sessionQuery = reactive({
-  pageNum: 1,
-  pageSize: 10,
-  status: undefined as string | undefined,
-  appId: '',
-  userId: '',
-  sessionId: '',
-  traceId: '',
-})
-
-const alertQuery = reactive({
-  pageNum: 1,
-  pageSize: 10,
-  status: undefined as string | undefined,
-  level: undefined as string | undefined,
-  ruleName: '',
-  sessionId: '',
-})
-
-const cleanupForm = reactive({
-  retentionDays: 7,
-  dryRun: true,
-})
-
-const summaryCards = computed(() => {
-  const totalSessions = overview.value?.totalSessions ?? 0
-  const totalTurns = overview.value?.totalTurns ?? 0
-  const avgTurns = totalSessions > 0 ? (totalTurns / totalSessions).toFixed(1) : '0'
-  return [
-    { label: 'Session 总数', value: totalSessions },
-    { label: '运行中 Session', value: overview.value?.runningSessions ?? 0 },
-    { label: '平均 Turn 数', value: avgTurns },
-    { label: '平均 Turn 时长', value: overview.value?.avgTurnDurationMs ?? 0, suffix: 'ms' },
-    { label: 'Token 使用总数', value: overview.value?.totalTokens ?? 0 },
-    { label: '平均 LLM 耗时', value: overview.value?.avgLlmLatencyMs ?? 0, suffix: 'ms' },
-    { label: 'Tool 调用总数', value: overview.value?.totalToolCalls ?? 0 },
-  ]
-})
-
+// 服务端分页：页码/每页大小由后端合并接口返回
 const sessionPagination = computed(() => ({
-  current: sessionQuery.pageNum,
-  pageSize: sessionQuery.pageSize,
+  current: sessionPage.value.pageNumber,
+  pageSize: sessionPage.value.pageSize,
   total: sessionPage.value.totalRow,
   showSizeChanger: true,
+  pageSizeOptions: ['10', '20', '50'],
   showTotal: (total: number) => `共 ${total} 条`,
 }))
 
-const alertPagination = computed(() => ({
-  current: alertQuery.pageNum,
-  pageSize: alertQuery.pageSize,
-  total: alertPage.value.totalRow,
-  showSizeChanger: true,
-  showTotal: (total: number) => `共 ${total} 条`,
-}))
+// 概览只反映会话池当前状态，趋势类指标统一看 Grafana
+const summaryCards = computed(() => [
+  {
+    label: '当前会话',
+    value: poolStats.value?.totalSessions ?? 0,
+    suffix: ` / ${poolStats.value?.maxSessions ?? 0}`,
+  },
+  { label: '运行中', value: poolStats.value?.runningSessions ?? 0 },
+  { label: '空闲', value: poolStats.value?.idleSessions ?? 0 },
+  {
+    label: '待处理请求',
+    value: poolSessions.value.reduce((sum, item) => sum + item.pendingRequests, 0),
+  },
+])
 
-const latencyChartDots = computed(() => {
-  const turns = [...(selectedSessionDetail.value?.turns ?? [])].reverse()
-  if (!turns.length) {
-    return []
+// 扁平 span 按父节点计算缩进层级，并按开始偏移量还原时间顺序
+const spanRows = computed(() => {
+  const tree = spanTree.value
+  if (!tree?.spans?.length) return []
+  const byId = new Map(tree.spans.map((span) => [span.spanId, span]))
+  const depthOf = (node: MonitorSpanNode, guard = 0): number => {
+    if (!node.parentSpanId || guard > 20) return 0
+    const parent = byId.get(node.parentSpanId)
+    return parent ? depthOf(parent, guard + 1) + 1 : 0
   }
-  const width = 640
-  const height = 200
-  const padding = 24
-  const maxValue = Math.max(...turns.map((item) => item.llmLatencyMs || 0), 1)
-  return turns.map((turn, index) => {
-    const usableWidth = width - padding * 2
-    const usableHeight = height - padding * 2
-    const x = turns.length === 1 ? width / 2 : padding + (index * usableWidth) / (turns.length - 1)
-    const y = height - padding - ((turn.llmLatencyMs || 0) / maxValue) * usableHeight
-    return {
-      key: turn.turnId,
-      x,
-      y,
-    }
-  })
+  const total =
+    tree.totalDurationMs || Math.max(...tree.spans.map((span) => span.offsetMs + span.durationMs), 1)
+  return [...tree.spans]
+    .sort((a, b) => a.offsetMs - b.offsetMs || a.seq - b.seq)
+    .map((span) => {
+      const offsetPercent = Math.min(100, Math.max(0, (span.offsetMs / total) * 100))
+      return {
+        ...span,
+        depth: depthOf(span),
+        offsetPercent,
+        widthPercent: Math.max(0.5, Math.min(100 - offsetPercent, (span.durationMs / total) * 100)),
+      }
+    })
 })
 
-const latencyChartPoints = computed(() => latencyChartDots.value.map((item) => `${item.x},${item.y}`).join(' '))
-
-const formatMs = (value?: number) => `${Math.round(value ?? 0)} ms`
-
-const statusColor = (status?: string) => {
-  switch (status) {
-    case 'success':
-      return 'green'
-    case 'error':
-      return 'red'
-    case 'running':
-      return 'blue'
-    case 'stopped':
-      return 'default'
-    default:
-      return 'default'
+const fetchPool = async () => {
+  poolLoading.value = true
+  try {
+    const res = await getSessionPool()
+    if (res.data.code === 0 && res.data.data) {
+      poolStats.value = res.data.data.stats
+      poolSessions.value = res.data.data.sessions || []
+      return
+    }
+    message.error(`获取会话池失败：${res.data.message}`)
+  } catch {
+    message.error('获取会话池失败')
+  } finally {
+    poolLoading.value = false
   }
 }
 
-const configSummary = (ruleKey: keyof MonitorConfigResponse['alerts']) => {
-  const rule = monitorConfig.value?.alerts?.[ruleKey]
-  if (!rule) {
-    return '-'
-  }
-  const threshold =
-    rule.thresholdSeconds ?? rule.thresholdRatio ?? rule.thresholdCount ?? rule.thresholdTurns ?? '-'
-  const windowSize = rule.windowSize ? `, window=${rule.windowSize}` : ''
-  return `${rule.enabled ? '启用' : '关闭'} / level=${rule.level} / threshold=${threshold}${windowSize}`
-}
-
-const fetchOverview = async () => {
-  const res = await getMonitorOverview()
-  if (res.data.code === 0 && res.data.data) {
-    overview.value = res.data.data as MonitorOverviewStats
-    return
-  }
-  message.error(`获取监控概览失败：${res.data.message}`)
-}
-
-const fetchConfig = async () => {
-  const res = await getMonitorConfig()
-  if (res.data.code === 0 && res.data.data) {
-    monitorConfig.value = res.data.data as MonitorConfigResponse
-    return
-  }
-  message.error(`获取监控配置失败：${res.data.message}`)
-}
-
+// 合并会话列表：后端把池内会话与历史会话合并，池外会话状态统一为 closed
 const fetchSessions = async () => {
   sessionLoading.value = true
   try {
-    const res = await listMonitorSessions({ ...sessionQuery })
+    const res = await listAllSessions({
+      pageNum: sessionPageNumber.value,
+      pageSize: sessionPageSize.value,
+      sessionId: sessionQuery.sessionId || undefined,
+      userId: sessionQuery.userId || undefined,
+      appId: sessionQuery.appId || undefined,
+      status: sessionQuery.status || undefined,
+    })
     if (res.data.code === 0 && res.data.data) {
-      sessionPage.value = res.data.data as MonitorPageData<MonitorSessionSummary>
+      sessionPage.value = res.data.data
       return
     }
     message.error(`获取会话列表失败：${res.data.message}`)
+  } catch {
+    message.error('获取会话列表失败')
   } finally {
     sessionLoading.value = false
   }
 }
 
-const fetchAlerts = async () => {
-  alertLoading.value = true
-  try {
-    const res = await listMonitorAlerts({ ...alertQuery })
-    if (res.data.code === 0 && res.data.data) {
-      alertPage.value = res.data.data as MonitorPageData<MonitorAlertRecordVO>
-      return
-    }
-    message.error(`获取告警列表失败：${res.data.message}`)
-  } finally {
-    alertLoading.value = false
-  }
-}
-
-const openSessionDetail = async (sessionId: string) => {
-  const res = await getMonitorSessionDetail(sessionId)
-  if (res.data.code === 0 && res.data.data) {
-    selectedSessionDetail.value = res.data.data as MonitorSessionDetail
-    sessionDrawerOpen.value = true
-    return
-  }
-  message.error(`获取 Session 详情失败：${res.data.message}`)
-}
-
-const openTurnDetail = async (turnId: string) => {
-  if (!selectedSessionDetail.value) {
-    return
-  }
-  const res = await getMonitorTurnDetail(selectedSessionDetail.value.session.sessionId, turnId)
-  if (res.data.code === 0 && res.data.data) {
-    selectedTurnDetail.value = res.data.data as MonitorTurnSummary
-    turnModalOpen.value = true
-    return
-  }
-  message.error(`获取 Turn 详情失败：${res.data.message}`)
-}
-
-const onSessionTableChange = (page: { current: number; pageSize: number }) => {
-  sessionQuery.pageNum = page.current
-  sessionQuery.pageSize = page.pageSize
-  fetchSessions()
-}
-
-const onAlertTableChange = (page: { current: number; pageSize: number }) => {
-  alertQuery.pageNum = page.current
-  alertQuery.pageSize = page.pageSize
-  fetchAlerts()
-}
+const refreshAll = () => Promise.all([fetchPool(), fetchSessions()])
 
 const doSessionSearch = () => {
-  sessionQuery.pageNum = 1
+  sessionPageNumber.value = 1
   fetchSessions()
 }
 
-const doAlertSearch = () => {
-  alertQuery.pageNum = 1
-  fetchAlerts()
+const resetSessionSearch = () => {
+  sessionQuery.sessionId = ''
+  sessionQuery.userId = ''
+  sessionQuery.appId = ''
+  sessionQuery.status = undefined
+  sessionPageNumber.value = 1
+  fetchSessions()
 }
 
-const runCleanup = async () => {
-  cleanupLoading.value = true
+const onSessionTableChange = (pagination: { current?: number; pageSize?: number }) => {
+  sessionPageNumber.value = pagination.current || 1
+  sessionPageSize.value = pagination.pageSize || sessionPageSize.value
+  fetchSessions()
+}
+
+const openSessionDetail = async (record: MergedSessionRow) => {
+  selectedPoolSession.value = record
+  sessionTurns.value = []
+  sessionDrawerOpen.value = true
+  turnLoading.value = true
   try {
-    const res = await cleanupMonitorHistory({
-      retentionDays: cleanupForm.retentionDays,
-      dryRun: cleanupForm.dryRun,
-    })
+    const res = await getMonitorSessionDetail(record.sessionId)
     if (res.data.code === 0 && res.data.data) {
-      cleanupResult.value = res.data.data as MonitorCleanupSummary
-      message.success(cleanupForm.dryRun ? '清理预览完成' : '清理执行完成')
-      await Promise.all([fetchOverview(), fetchAlerts()])
-      return
+      sessionTurns.value = res.data.data.turns || []
     }
-    message.error(`执行清理失败：${res.data.message}`)
+  } catch {
+    // 会话尚无 Trace 记录时后端可能直接报错，按空态处理
   } finally {
-    cleanupLoading.value = false
+    turnLoading.value = false
   }
 }
 
-onMounted(async () => {
-  await Promise.all([fetchOverview(), fetchConfig(), fetchSessions(), fetchAlerts()])
+const openTurnSpans = async (turn: MonitorTurnSummary) => {
+  if (!selectedPoolSession.value) return
+  currentTurn.value = turn
+  spanTree.value = undefined
+  spanDrawerOpen.value = true
+  spanLoading.value = true
+  try {
+    const res = await getMonitorTurnSpans(selectedPoolSession.value.sessionId, turn.turnId)
+    if (res.data.code === 0 && res.data.data) {
+      spanTree.value = res.data.data as MonitorTurnSpanTree
+      return
+    }
+    message.error(`获取链路失败：${res.data.message}`)
+  } catch {
+    message.error('获取链路失败')
+  } finally {
+    spanLoading.value = false
+  }
+}
+
+// 运行态势与告警统一在 Grafana 查看，前端只做业务排障
+const openGrafana = () => {
+  window.open(import.meta.env.VITE_GRAFANA_URL || 'http://127.0.0.1:3000', '_blank')
+}
+
+const statusLabel = (status?: string) =>
+  ({ running: '运行中', idle: '空闲', closed: '已关闭' } as Record<string, string>)[status || ''] ||
+  status ||
+  '-'
+
+const poolStatusColor = (status?: string) =>
+  ({ running: 'blue', idle: 'green', closed: 'default' } as Record<string, string>)[status || ''] ||
+  'default'
+
+const turnStatusColor = (status?: string) =>
+  ({ success: 'green', error: 'red', running: 'blue', stopped: 'orange' } as Record<string, string>)[
+    status || ''
+  ] || 'default'
+
+// span 类别区分：标签色 + 时间条色（错误统一红色覆盖）
+const spanKindMeta = (opType?: string) => {
+  const map: Record<string, { label: string; tagColor: string; barColor: string }> = {
+    agent: { label: 'Agent', tagColor: 'purple', barColor: '#722ed1' },
+    tool: { label: '工具', tagColor: 'orange', barColor: '#fa8c16' },
+    retrieval: { label: '检索', tagColor: 'gold', barColor: '#faad14' },
+    llm: { label: 'LLM', tagColor: 'blue', barColor: '#1677ff' },
+    compaction: { label: '压缩', tagColor: 'default', barColor: '#8c8c8c' },
+    turn: { label: 'Turn', tagColor: 'geekblue', barColor: '#2f54eb' },
+  }
+  return map[opType || ''] || { label: opType || '其他', tagColor: 'default', barColor: '#8c8c8c' }
+}
+
+const formatMs = (value?: number) => (value == null ? '-' : `${Math.round(Number(value))} ms`)
+
+const formatIdle = (seconds?: number) => {
+  const value = Number(seconds || 0)
+  if (value < 60) return `${value}s`
+  if (value < 3600) return `${Math.floor(value / 60)}m`
+  return `${(value / 3600).toFixed(1)}h`
+}
+
+const formatRelativeTime = (value?: string) => {
+  if (!value) return '-'
+  const ts = new Date(value).getTime()
+  if (Number.isNaN(ts)) return value
+  const diff = Math.max(0, Math.floor((Date.now() - ts) / 1000))
+  if (diff < 60) return `${diff} 秒前`
+  if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`
+  if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`
+  return new Date(ts).toLocaleString()
+}
+
+const shortTraceId = (traceId?: string) => {
+  if (!traceId) return '-'
+  return traceId.length > 18 ? `${traceId.slice(0, 18)}…` : traceId
+}
+
+onMounted(() => {
+  refreshAll()
 })
 </script>
 
 <style scoped>
-#monitorManagePage {
-  padding: 24px;
-}
+/* 页边距统一由全局 .page-shell 模板类提供（styles/theme.css） */
 
-.summary-row {
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
   margin-bottom: 16px;
 }
 
+.page-title {
+  margin: 0 0 4px;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.summary-row,
 .panel-card {
   margin-bottom: 16px;
 }
 
-.tag-list {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.cleanup-hint {
-  margin-top: 12px;
-}
-
-.cleanup-result {
-  margin-top: 12px;
-  display: grid;
-  gap: 8px;
-}
-
-.cleanup-table-tags {
-  margin-top: 4px;
+.search-form {
+  row-gap: 8px;
 }
 
 .subtle-text {
@@ -628,42 +482,56 @@ onMounted(async () => {
   font-size: 12px;
 }
 
-.chart-card {
-  position: relative;
-  background: var(--bg-subtle);
-  border: 1px solid var(--border-default);
-  border-radius: 8px;
-  padding: 12px;
-  min-height: 220px;
+.mono-text {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
 }
 
-.latency-chart {
-  width: 100%;
-  height: 220px;
+.span-list {
+  display: grid;
+  gap: 12px;
 }
 
-.axis-line {
-  stroke: var(--border-strong);
-  stroke-width: 1;
+.span-row {
+  display: grid;
+  gap: 4px;
 }
 
-.chart-line {
-  stroke: var(--accent-primary);
-  stroke-width: 3;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-.chart-dot {
-  fill: var(--accent-primary);
-}
-
-.chart-empty {
-  position: absolute;
-  inset: 0;
+.span-head {
   display: flex;
   align-items: center;
-  justify-content: center;
+  gap: 8px;
+}
+
+.span-name {
+  font-weight: 500;
+}
+
+.span-meta {
   color: rgba(0, 0, 0, 0.45);
+  font-size: 12px;
+}
+
+.span-track {
+  height: 8px;
+  background: #f0f0f0;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.span-bar {
+  height: 100%;
+  border-radius: 4px;
+}
+
+.span-kind-tag {
+  min-width: 44px;
+  text-align: center;
+  margin-right: 0;
+}
+
+.span-error {
+  color: #ff4d4f;
+  font-size: 12px;
 }
 </style>

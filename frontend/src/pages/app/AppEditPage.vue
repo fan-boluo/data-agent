@@ -1,5 +1,5 @@
 <template>
-  <div id="appEditPage">
+  <div id="appEditPage" class="page-shell">
     <div class="page-header">
       <h1>编辑项目信息</h1>
     </div>
@@ -91,7 +91,7 @@ const fetchAppInfo = async () => {
   }
   loading.value = true
   try {
-    const res = await getAppVoById({ id: id as unknown as number })
+    const res = await getAppVoById({ id: String(id) })
     if (res.data.code === 0 && res.data.data) {
       appInfo.value = res.data.data
       if (!isAdmin.value && appInfo.value.owner !== loginUserStore.loginUser.id) {
@@ -162,8 +162,8 @@ onMounted(() => {
 </script>
 
 <style scoped>
+/* 页边距统一由全局 .page-shell 模板类提供（styles/theme.css），此处只保留表单居中约束 */
 #appEditPage {
-  padding: 32px 24px;
   max-width: 880px;
   margin: 0 auto;
 }

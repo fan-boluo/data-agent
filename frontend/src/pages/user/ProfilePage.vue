@@ -1,5 +1,5 @@
 <template>
-  <div id="profilePage">
+  <div id="profilePage" class="page-shell">
     <a-row :gutter="16">
       <!-- 配额卡片 -->
       <a-col :span="8">
@@ -290,8 +290,8 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+/* 页边距统一由全局 .page-shell 模板类提供（styles/theme.css） */
 #profilePage {
-  padding: 24px;
   min-height: calc(100vh - 64px);
 }
 </style>

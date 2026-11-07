@@ -78,20 +78,17 @@ const confirmClose = (chat: OpenedChat) => {
 </script>
 
 <style scoped>
+/* 页签并入顶部栏：透明承载、胶囊 chip，不再独占一栏 */
 .chat-tabs-bar {
-  height: 36px;
   flex-shrink: 0;
-  background: var(--bg-surface);
-  border-bottom: 1px solid var(--border-light);
-  z-index: 5;
-  position: relative;
+  display: flex;
+  align-items: center;
 }
 
 .chat-tabs {
   display: flex;
-  align-items: stretch;
-  height: 100%;
-  padding: 0 8px;
+  align-items: center;
+  gap: 6px;
   overflow-x: auto;
 }
 
@@ -100,39 +97,32 @@ const confirmClose = (chat: OpenedChat) => {
 }
 
 .chat-tab {
-  position: relative;
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 0 12px;
+  padding: 4px 12px;
   font-size: 13px;
   color: var(--text-secondary);
   cursor: pointer;
-  border-right: 1px solid var(--border-light);
-  transition: background 0.15s;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-light);
+  border-radius: 999px;
+  transition: all 0.18s ease;
   user-select: none;
-  max-width: 220px;
+  max-width: 200px;
+  white-space: nowrap;
 }
 
 .chat-tab:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
+  border-color: var(--accent-primary);
+  color: var(--accent-primary);
 }
 
 .chat-tab.active {
   background: var(--accent-primary-light);
+  border-color: var(--accent-primary);
   color: var(--accent-primary);
   font-weight: 500;
-}
-
-.chat-tab.active::after {
-  content: '';
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  height: 2px;
-  background: var(--accent-primary);
 }
 
 .gen-dot {
@@ -166,7 +156,7 @@ const confirmClose = (chat: OpenedChat) => {
   justify-content: center;
   width: 16px;
   height: 16px;
-  border-radius: 3px;
+  border-radius: 50%;
   font-size: 10px;
   opacity: 0;
   transition: opacity 0.1s, background 0.1s;

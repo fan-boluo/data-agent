@@ -64,6 +64,65 @@ export interface MonitorTurnSummary {
   createdAt?: string
 }
 
+export interface SessionPoolStats {
+  totalSessions: number
+  runningSessions: number
+  idleSessions: number
+  closedSessions: number
+  maxSessions: number
+}
+
+export interface PoolSessionSummary {
+  sessionId: string
+  appId: string
+  userId: string
+  agentName: string
+  status: string
+  activeTasks: number
+  pendingRequests: number
+  messageCount: number
+  lastActivityAt?: string
+  idleSeconds: number
+}
+
+export interface MergedSessionRow {
+  sessionId: string
+  appId: string
+  userId: string
+  status: string
+  inPool: boolean
+  totalTurns: number
+  messageCount: number
+  lastActivityAt?: string
+  idleSeconds: number
+  pendingRequests: number
+}
+
+export interface MonitorSpanNode {
+  spanId: string
+  parentSpanId: string
+  opType: string
+  name: string
+  agent: string
+  seq: number
+  status: string
+  error?: string | null
+  startedAt?: string
+  durationMs: number
+  offsetMs: number
+  attributes: Record<string, unknown>
+}
+
+export interface MonitorTurnSpanTree {
+  traceId: string
+  sessionId: string
+  turnId: string
+  startedAt?: string
+  totalDurationMs: number
+  spanCount: number
+  spans: MonitorSpanNode[]
+}
+
 export interface MonitorAlertRecordVO {
   id?: number
   ruleName: string

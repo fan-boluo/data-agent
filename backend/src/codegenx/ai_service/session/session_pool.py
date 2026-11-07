@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import OrderedDict
+from datetime import datetime
 from typing import Any, Optional
 from codegenx.ai_service.context.session_context import SessionContext
 from codegenx.ai_service.component import BaseComponent, ComponentType
@@ -442,6 +443,40 @@ class SessionPool(BaseComponent):
             "max_sessions": self.max_sessions,
             "idle_timeout_seconds": self.idle_timeout_seconds,
         }
+
+    async def snapshot(self) -> list[dict[str, Any]]:
+        """池内会话快照：状态按「关闭 / 处理中 / 空闲」三分，供管理端概览与检索。"""
+        now = time.time()
+        async with self._lock:
+            items: list[dict[str, Any]] = []
+            for session_id, session in self._sessions.items():
+                closed = bool(getattr(session, "closed", False))
+                active_tasks = len(getattr(session, "active_tasks", {}) or {})
+                pending = len(getattr(session, "pending_requests", []) or [])
+                processing = bool(getattr(session, "processing", False))
+                if closed:
+                    status = "closed"
+                elif active_tasks or pending or processing:
+                    status = "running"
+                else:
+                    status = "idle"
+                ctx = getattr(session, "context_manager", None)
+                last_active = float(getattr(session, "last_activity_at", 0) or 0)
+                items.append(
+                    {
+                        "sessionId": session_id,
+                        "appId": str(getattr(session, "app_id", "") or ""),
+                        "userId": str(getattr(session, "user_id", "") or ""),
+                        "agentName": str(getattr(session, "agent_name", "") or ""),
+                        "status": status,
+                        "activeTasks": active_tasks,
+                        "pendingRequests": pending,
+                        "messageCount": len(getattr(ctx, "chat_messages", []) or []),
+                        "lastActivityAt": datetime.fromtimestamp(last_active).isoformat() if last_active else None,
+                        "idleSeconds": int(now - last_active) if last_active else 0,
+                    }
+                )
+            return items
 
 
 def initialize_session_pool(system_app) -> SessionPool:
