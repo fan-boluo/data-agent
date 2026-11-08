@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import time
 from threading import Lock
 
 from prometheus_client import Counter, Gauge, Histogram
@@ -29,13 +30,6 @@ active_sessions = Gauge(
     "codegenx_active_sessions",
     "Currently running agent sessions",
     ["app_id"],
-)
-
-session_duration_seconds = Histogram(
-    "codegenx_session_duration_seconds",
-    "Session wall-clock duration",
-    ["app_id"],
-    buckets=[30, 60, 120, 300, 600, 900, 1800, 3600],
 )
 
 # ---------------------------------------------------------------------------
@@ -90,22 +84,27 @@ llm_completion_tokens_total = Counter(
 )
 
 # ---------------------------------------------------------------------------
-# LLM 韧性层（resilience.py 喂入：重试/降级/熔断）
+# LLM 韧性层（resilience.py 喂入：重试/降级/熔断 —— 全部"当前状态"口径，无历史累积）
 # ---------------------------------------------------------------------------
-llm_retry_total = Counter(
-    "codegenx_llm_retry_total",
-    "Same-model retries by the resilient executor",
-    ["scenario", "model"],
+llm_retrying = Gauge(
+    "codegenx_llm_retrying",
+    "Calls currently in backoff retry sleep (per model)",
+    ["model"],
 )
-llm_fallback_total = Counter(
-    "codegenx_llm_fallback_total",
-    "Calls that switched to a fallback model",
-    ["scenario", "model"],
+llm_last_retries = Gauge(
+    "codegenx_llm_last_retries",
+    "Retry attempts used by the most recent call on this model (0 = first try ok)",
+    ["model"],
 )
-llm_breaker_opens_total = Counter(
-    "codegenx_llm_breaker_opens_total",
-    "Circuit breaker OPEN transitions",
-    ["circuit"],
+llm_last_fallback_seconds = Gauge(
+    "codegenx_llm_last_fallback_seconds",
+    "Unix ts of the most recent fallback switch (model=主模型 target=实际降级到的模型)",
+    ["model", "target"],
+)
+llm_last_failure_seconds = Gauge(
+    "codegenx_llm_last_failure_seconds",
+    "Unix ts of the most recent failed attempt (outcome=错误分类)",
+    ["model", "outcome"],
 )
 llm_circuit_state = Gauge(
     "codegenx_llm_circuit_state",
@@ -136,16 +135,10 @@ tool_circuit_state = Gauge(
     ["tool_name"],
 )
 
-tool_breaker_opens_total = Counter(
-    "codegenx_tool_breaker_opens_total",
-    "Tool circuit breaker open events",
-    ["tool_name"],
-)
-
-# 失败分类：exception / timeout / infra / business / circuit_open
-tool_errors_total = Counter(
-    "codegenx_tool_errors_total",
-    "Tool failures by error class",
+# 最近一次工具失败时间戳（按失败分类；circuit_open 不算失败原因，不喂此指标）
+tool_last_failure_seconds = Gauge(
+    "codegenx_tool_last_failure_seconds",
+    "Unix ts of the most recent tool failure (arg_invalid=LLM入参问题 execution=执行失败 timeout=超时)",
     ["tool_name", "error_class"],
 )
 
@@ -245,23 +238,12 @@ embedding_latency_seconds = Histogram(
     ["model"],
     buckets=[0.05, 0.1, 0.3, 0.5, 1, 2, 5, 10, 30],
 )
-embedding_batch_size = Histogram(
-    "codegenx_embedding_batch_size",
-    "Texts per embedding batch request",
-    ["model"],
-    buckets=[1, 2, 5, 10, 20, 50],
-)
-embedding_errors_total = Counter(
-    "codegenx_embedding_errors_total",
-    "Embedding failures by error class",
+embedding_last_failure_seconds = Gauge(
+    "codegenx_embedding_last_failure_seconds",
+    "Unix ts of the most recent embedding batch failure (timeout/rate_limit/auth/connection/other)",
     ["model", "error_class"],
 )
 # embedding 级熔断（通用 CircuitBreaker 以 metric_prefix 反射引用）
-embedding_breaker_opens_total = Counter(
-    "codegenx_embedding_breaker_opens_total",
-    "Embedding circuit breaker OPEN transitions",
-    ["circuit"],
-)
 embedding_circuit_state = Gauge(
     "codegenx_embedding_circuit_state",
     "Embedding circuit breaker state (0=closed 1=half_open 2=open)",
@@ -288,13 +270,12 @@ def classify_embedding_error(exc: Exception) -> str:
 
 
 def feed_embedding_call(
-    *, model: str, batch_size: int, latency_s: float, error_class: str = "",
+    *, model: str, latency_s: float, error_class: str = "",
 ) -> None:
-    """单批 embedding 收口：批次计数 + 批大小 + 成功延迟/失败分类。"""
-    embedding_batch_size.labels(model=model).observe(max(0, batch_size))
+    """单批 embedding 收口：成功计数+延迟；失败计数+最近失败时间戳（按错误分类）。"""
     if error_class:
         embedding_calls_total.labels(model=model, outcome="error").inc()
-        embedding_errors_total.labels(model=model, error_class=error_class).inc()
+        embedding_last_failure_seconds.labels(model=model, error_class=error_class).set(time.time())
         return
     embedding_calls_total.labels(model=model, outcome="ok").inc()
     embedding_latency_seconds.labels(model=model).observe(max(0.0, latency_s))
@@ -401,10 +382,9 @@ def feed_session_start(*, app_id: str, status: str = "running") -> None:
     active_sessions.labels(app_id=app_id).inc()
 
 
-def feed_session_end(*, app_id: str, duration_s: float) -> None:
-    """session 结束：活跃 -1、时长直方图。"""
+def feed_session_end(*, app_id: str) -> None:
+    """session 结束：活跃 -1（时长不采集——会话由空闲超时关闭，时长无排障价值）。"""
     active_sessions.labels(app_id=app_id).dec()
-    session_duration_seconds.labels(app_id=app_id).observe(max(0.0, duration_s))
 
 
 def feed_turn_end(*, app_id: str, status: str, duration_ms: float) -> None:
@@ -429,16 +409,26 @@ def feed_llm_attempt(
         if first_token_ms:
             llm_first_token_seconds.labels(model=model).observe(first_token_ms / 1000)
         get_streak_tracker().track_llm_latency(model=model, latency_s=total_ms / 1000)
+    else:
+        # 最近一次失败时间戳（结合熔断状态判断是否已恢复；outcome 去掉 error_ 前缀）
+        llm_last_failure_seconds.labels(
+            model=model, outcome=outcome.removeprefix("error_"),
+        ).set(time.time())
 
 
 def feed_tool_call(*, app_id: str, session_id: str, tool_name: str, is_error: bool,
                    latency_ms: float, error_class: str = "") -> None:
-    """单次工具调用：计数/延迟 + 连续失败 streak + 失败分类（异常统一上报）。"""
+    """单次工具调用：计数/延迟 + 连续失败 streak + 最近失败时间戳（按分类）。
+
+    分类口径：arg_invalid=LLM 传入参数/SQL 有问题（业务失败，不计熔断）、
+    execution=工具执行本身失败（连接/资源/驱动，计入熔断）、timeout=超时（计入熔断）。
+    circuit_open 是熔断的结果而非失败原因，不进"最近失败"（熔断状态已体现）。
+    """
     status = "error" if is_error else "ok"
     tool_calls_total.labels(app_id=app_id, tool_name=tool_name, status=status).inc()
     tool_latency_seconds.labels(app_id=app_id, tool_name=tool_name).observe(max(0.0, latency_ms) / 1000)
-    if is_error:
-        tool_errors_total.labels(tool_name=tool_name, error_class=error_class or "unknown").inc()
+    if is_error and error_class and error_class != "circuit_open":
+        tool_last_failure_seconds.labels(tool_name=tool_name, error_class=error_class).set(time.time())
     get_streak_tracker().track_tool_outcome(session_id=session_id, tool_name=tool_name, is_error=is_error)
 
 

@@ -16,9 +16,11 @@
     "format": "prettier --write --experimental-cli src/"
   },
   "dependencies": {
+    "@ant-design/icons-vue": "^7.0.1",
     "@guolao/vue-monaco-editor": "^1.6.0",
     "ant-design-vue": "^4.2.6",
     "axios": "^1.14.0",
+    "dayjs": "1.11.21",
     "echarts": "^6.0.0",
     "highlight.js": "^11.11.1",
     "markdown-it": "^14.1.1",

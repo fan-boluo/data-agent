@@ -1,3 +1,5 @@
+SET NAMES utf8mb4;
+
 -- ============================================================
 -- 记忆系统表
 -- 存储栈：MySQL(唯一真源) + Qdrant(agent_memory_warm, 可重建检索层)
@@ -5,7 +7,7 @@
 --       字符集 utf8mb4 / utf8mb4_unicode_ci；不使用外键
 -- 建表顺序：memory_type_dict -> agent_memory -> memory_task
 --           -> memory_watermark -> memory_sync_checkpoint
--- 使用：与 init/schema.sql 同库（codegenx），部署方手动执行。
+-- 使用：与 init/schema.sql 同库（dataagent），部署方手动执行。
 -- ============================================================
 
 use dataagent;

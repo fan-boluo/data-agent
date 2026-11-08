@@ -109,10 +109,9 @@ class EmbeddingClient:
                     input=batch,
                     dimensions=self.dimensions,
                 )
-                # 成功收口：批大小 + 往返延迟（含重试耗时）
+                # 成功收口：往返延迟（含重试耗时）
                 feed_embedding_call(
                     model=self.model_name,
-                    batch_size=len(batch),
                     latency_s=time.monotonic() - started,
                 )
                 return [item.embedding for item in resp.data]
@@ -124,7 +123,6 @@ class EmbeddingClient:
         # 重试耗尽按失败收口，error_class 取最后一次真实异常
         feed_embedding_call(
             model=self.model_name,
-            batch_size=len(batch),
             latency_s=time.monotonic() - started,
             error_class=classify_embedding_error(last_exc or RuntimeError("unknown")),
         )

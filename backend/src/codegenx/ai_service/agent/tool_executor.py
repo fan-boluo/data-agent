@@ -341,7 +341,7 @@ class ToolExecutor(BaseComponent):
                 raise
             except Exception as exc:
                 # 异常统一收口为失败结果：后续指标/日志/熔断记账不会被跳过
-                error_class = "timeout" if isinstance(exc, (asyncio.TimeoutError, TimeoutError)) else "exception"
+                error_class = "timeout" if isinstance(exc, (asyncio.TimeoutError, TimeoutError)) else "execution"
                 log.warning("[tool_call] tool={} status=error class={} app_id={} session_id={} err={}: {}",
                             tool_name, error_class, app_id, session_id, type(exc).__name__, exc)
                 result = ToolResult(success=False, message=f"{type(exc).__name__}: {exc}")
@@ -359,8 +359,9 @@ class ToolExecutor(BaseComponent):
         if result.success:
             await breaker.record_success()
         else:
+            # 分类口径：基础设施类失败（超时/执行异常）计入熔断；LLM 入参问题不计
             counted = bool(error_class) or is_infra_failure(message=result.message)
-            error_class = error_class or ("infra" if counted else "business")
+            error_class = error_class or ("execution" if counted else "arg_invalid")
             await breaker.record_failure(count_as_failure=counted)
 
         latency_ms = (time.monotonic() - t0) * 1000

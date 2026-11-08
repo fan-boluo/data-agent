@@ -21,9 +21,9 @@ scrape_configs:
       - targets: ['localhost:9090']
 
   # 单后端应用（FastAPI，/metrics 由 prometheus_client 暴露）
-  - job_name: codegenx-backend
+  - job_name: dataagent-backend
     metrics_path: /metrics
     static_configs:
       - targets: ['__BACKEND_TARGET__']
         labels:
-          service: codegenx-backend
+          service: dataagent-backend

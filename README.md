@@ -32,7 +32,7 @@ uv单体架构
 | 前端 | Vue 3 + TypeScript + Vite + Pinia + Ant Design Vue 4 |
 | 编辑器 | Monaco Editor (`@guolao/vue-monaco-editor`) |
 | 后端框架 | FastAPI (Python 3.12) |
-| 数据库 | PostgreSQL 8.0 (SQLAlchemy + asyncpg 异步) |
+| 数据库 | PostgreSQL 16 (SQLAlchemy + asyncpg 异步) + MySQL 8.0 |
 | 缓存 | Redis 7 |
 | 向量存储 | Qdrant |
 | 监控 | Prometheus |
@@ -275,96 +275,84 @@ pnpm dev
 
 Ctrl+C 或关闭终端即可。
 
-### Docker 部署（推荐用于生产）
+### Docker 部署
 
-一键拉起全部服务（前端 + 后端 + MySQL + PostgreSQL + Redis + Qdrant）：
+一条命令拉起数据服务 + 前后端 + 监控（全容器模式）：
 
 ```bash
-# 1) 准备后端配置（必填项：数据库密码、JWT、LLM provider API Key）
+# 1) 准备配置（必填：数据库密码、JWT、LLM provider API Key）
 cp backend/.env.example backend/.env
-# 编辑 backend/.env 填入真实密码和 Key
-
-# 2) 准备 compose 根目录变量
 cp .env.example .env
-# 编辑 .env 填入 MYSQL_ROOT_PASSWORD / MYSQL_DB / MYSQL_USER / MYSQL_PASSWORD
-#            POSTGRES_PASSWORD / REDIS_PASSWORD
 
-# 3) 构建并启动（首次 build 较慢，后续 compose 会复用镜像层）
-docker compose up -d --build
+# 2) 一键构建并启动
+docker compose --profile localdb --profile monitoring up -d --build
 
-# 4) 等待数据库健康后，查看初始化结果
-#    首次启动（数据卷为空）会自动按顺序执行 init/ 下脚本：
-#      MySQL    : 01_schema.sql（建库 dataagent + 用户/项目等表）
-#                 → 02_memory_schema.sql（记忆系统表）
-#                 → 03_seed.sql（初始化 admin 用户，密码 boluo123）
-#      PostgreSQL: 01_semantic_schema.sql（语义层 + pgvector）
-#                 → 02_telemetry_schema.sql（监控 telemetry）
-docker compose logs mysql | Select-String "initdb"     # PowerShell 查看初始化日志
-docker compose exec -T mysql mysql -uroot -p"<root密码>" -e "select userAccount,userRole from dataagent.user;"
+# 3) 首次启动（数据卷为空）自动按序执行 init/：
+#      MySQL     : schema.sql（建库 dataagent）→ memory_schema.sql → seed.sql（admin / boluo123）
+#      PostgreSQL: semantic_schema.sql（语义层 + pgvector）→ telemetry_schema.sql
+docker compose logs mysql | Select-String "initdb"
 
-# 5) 已有数据卷 / 手动补跑初始化脚本（自动化入口只在空库时执行一次）
-docker compose exec -T mysql mysql -uroot -p"<root密码>" < init/schema.sql
-docker compose exec -T mysql mysql -uroot -p"<root密码>" < init/memory_schema.sql
-docker compose exec -T mysql mysql -uroot -p"<root密码>" < init/seed.sql
-docker compose exec -T postgres psql -U postgres -f - < init/semantic_schema.sql
-docker compose exec -T postgres psql -U postgres -f - < init/telemetry_schema.sql
-
-# 6) 查看运行状态
+# 4) 验证
 docker compose ps
-docker compose logs -f backend        # 看后端日志
-docker compose logs -f frontend       # 看前端 Nginx 日志
-
-# 7) 访问
-#    前端：http://localhost
-#    API 健康检查：http://localhost/api/health
-#    Prometheus 指标：http://localhost/metrics
-
-# 8) 停止并清理（注意 -v 会清空数据卷，谨慎使用）
-docker compose down
-docker compose down -v                # 彻底清除数据（仅调试阶段用）
-
-# 9) 重新构建某个服务（代码更新后）
-docker compose up -d --build backend
-docker compose up -d --build frontend
+docker compose exec -T mysql mysql -uroot -p"<root密码>" --default-character-set=utf8mb4 \
+  -e "select userAccount,userName from dataagent.user;"
 ```
 
+> 后端默认通过 `host.docker.internal` 访问宿主机数据服务。全容器模式需先把 compose 中
+> backend 的 `MYSQL_HOST / POSTGRES_HOST / REDIS_HOST / QDRANT_URL` 改为服务名
+> （`mysql / postgres / redis / qdrant`），并恢复对这四个服务的 `depends_on` 健康检查。
+
 > **初始化说明**
-> - 自动初始化仅在数据卷为空时触发；若服务已启动过，请按第 5 步手动补跑。
+> - 自动初始化仅在数据卷为空时触发；已有数据卷请手动补跑 init 脚本。
 > - `seed.sql` 内置管理员 `admin / boluo123`，**上线前务必修改密码**。
+> - 数据库默认端口与本地服务冲突时，可在根 `.env` 调整 `MYSQL_HOST_PORT` /
+>   `POSTGRES_HOST_PORT` / `REDIS_HOST_PORT` / `QDRANT_HOST_PORT`。
+
+> 当前开发环境的混合部署方式（数据服务用宿主机、前后端与监控用 Docker）及常用运维命令，
+> 见 [deploy.md](./deploy.md)。
 
 #### 容器说明
 
-| 服务 | 镜像 | 端口 | 说明 |
-|---|---|---|---|
-| **frontend** | `codegenx-frontend` (nginx:alpine) | 80（可改 FRONTEND_PORT） | 托管 Vite 构建产物，反向代理 `/api` → backend |
-| **backend** | `codegenx-backend` (python:3.12-slim) | 内部 8456 | FastAPI + uvicorn，只在 compose 网络内暴露 |
-| **mysql** | `mysql:8.0` | 内部 3306 | 用户类数据 + 记忆真源（utf8mb4） |
-| **postgres** | `pgvector/pgvector:pg16` | 内部 5432 | 主业务库 + 语义层 + pgvector 扩展 |
-| **redis** | `redis:7-alpine` | 内部 6379 | 缓存 + 限流 |
-| **qdrant** | `qdrant/qdrant` | 内部 6333 | 向量存储（记忆 + 语义检索） |
+| 服务 | 镜像 | 宿主机端口 | profile | 说明 |
+|---|---|---|---|---|
+| **frontend** | `dataagent-frontend`（nginx:alpine） | 80（`FRONTEND_PORT`） | 默认 | 托管 Vite 构建产物，反代 `/api` → backend |
+| **backend** | `dataagent-backend`（python:3.12-slim） | 8456（`APP_PORT`） | 默认 | FastAPI + uvicorn，暴露 API / `/docs` / `/metrics` |
+| **prometheus** | `prom/prometheus` | 9090 | monitoring | 抓取后端 `/metrics` |
+| **grafana** | `grafana/grafana` | 3000 | monitoring | 看板 `dataagent-overview` |
+| **alertmanager** | `prom/alertmanager` | 9093 | monitoring | 告警路由 |
+| **alert-sink** | 自研 | 9000 | monitoring | 接收 webhook 告警 |
+| **mysql** | `mysql:8.0` | 3307 → 3306 | localdb | 用户类数据 + 记忆真源（utf8mb4） |
+| **postgres** | `pgvector/pgvector:pg16` | 5433 → 5432 | localdb | 主业务库 + 语义层 + pgvector |
+| **redis** | `redis:7-alpine` | 6380 → 6379 | localdb | 缓存 + 限流 |
+| **qdrant** | `qdrant/qdrant` | 6333（HTTP）/ 6334（gRPC） | localdb | 向量存储 |
+
+> `localdb` 组的宿主机端口刻意避开 3306 / 5432 / 6379，防止与本地已安装的数据库冲突。
+> 端口均可通过根 `.env` 覆盖。
 
 #### 数据持久化
 
-compose 定义了 5 个 named volume，容器重建不会丢数据：
+compose 定义 5 个 named volume（数据服务运行在容器内时生效），容器重建不会丢数据：
 
 | Volume | 挂载路径 | 内容 |
 |---|---|---|
-| `mysql_data` | `/var/lib/mysql` | MySQL 数据（用户类数据、记忆真源） |
-| `pg_data` | `/var/lib/postgresql/data` | PostgreSQL 主库 |
-| `redis_data` | `/data` | Redis AOF 持久化 |
-| `qdrant_data` | `/qdrant/storage` | Qdrant 向量数据 |
-| `codegenx_data` | 后端容器 `/data` | 看板 JSON / 会话快照 / chat_message |
+| `dataagent_mysql_data` | `/var/lib/mysql` | MySQL 数据（用户类数据、记忆真源） |
+| `dataagent_pg_data` | `/var/lib/postgresql/data` | PostgreSQL 主库 |
+| `dataagent_redis_data` | `/data` | Redis AOF 持久化 |
+| `dataagent_qdrant_data` | `/qdrant/storage` | Qdrant 向量数据 |
+| `dataagent_data` | 后端容器 `/data` | 看板 JSON / 会话快照 / chat_message |
 
-> ⚠️ `docker compose down -v` 会删除全部 volume。如果只是重启服务，用 `docker compose down`（不加 -v）。
+
+
 
 #### 目录结构
 
 ```
 DataAgent/
-├── docker-compose.yml            # 一键编排（根目录）
-├── .env.example                  # compose 根变量（MYSQL_* / POSTGRES_* 等）
-├── .dockerignore                 # 根目录构建忽略
-├── init/                         # 数据库初始化脚本（首次启动自动执行）
+├── docker-compose.yml            # 一键编排（profiles: 默认 / localdb / monitoring）
+├── .env                          # compose 根变量（凭据、端口）
+├── .env.example                  # 根变量模板
+├── deploy.md                     # 当前混合部署方式与常用运维
+├── init/                         # 数据库初始化脚本
 │   ├── schema.sql                # MySQL：建库 dataagent + 业务表
 │   ├── memory_schema.sql         # MySQL：记忆系统表
 │   ├── seed.sql                  # MySQL：初始化 admin 用户
@@ -372,27 +360,33 @@ DataAgent/
 │   └── telemetry_schema.sql      # PostgreSQL：监控 telemetry
 │
 ├── backend/
-│   ├── Dockerfile                # 后端多阶段构建（python:3.12-slim 运行）
+│   ├── Dockerfile                # 多阶段构建（builder 安装依赖 → slim 运行）
 │   ├── .dockerignore
 │   ├── .env.example              # 后端运行时配置模板
 │   └── src/ ...
 │
-└── frontend/
-    ├── Dockerfile                # 前端多阶段构建（nginx:alpine 运行）
-    ├── .dockerignore
-    ├── docker/
-    │   └── nginx.conf            # SPA 路由 + /api 反向代理 + SSE 长连接
-    └── src/ ...
+├── frontend/
+│   ├── Dockerfile                # 多阶段构建（node 构建 → nginx:alpine 运行）
+│   ├── .dockerignore
+│   ├── docker/
+│   │   └── nginx.conf            # SPA 路由 + /api 反代 + SSE 长连接
+│   └── src/ ...
+│
+└── infra/monitoring/             # Prometheus / Grafana / Alertmanager 配置
+    ├── prometheus.yml
+    ├── prometheus_alerts.yml
+    └── grafana/dashboards/dataagent-overview.json
 ```
 
 #### 生产部署检查清单
 
 - [ ] 后端 `backend/.env` 中 `JWT_ALGORITHM=RS256`，配好私钥路径（不要用 HS256 对称密钥）
-- [ ] `MYSQL_ROOT_PASSWORD` / `MYSQL_PASSWORD` / `POSTGRES_PASSWORD` / `REDIS_PASSWORD` / `JWT_SECRET` 改掉默认值
+- [ ] `MYSQL_ROOT_PASSWORD` / `POSTGRES_PASSWORD` / `REDIS_PASSWORD` / `JWT_SECRET` / `GRAFANA_PASSWORD` 改掉默认值
 - [ ] 后端 `config.json` 中的 LLM provider API Key 已填入
 - [ ] 配置 HTTPS（Nginx 加 SSL 或前置 LB）
-- [ ] 数据库初始化脚本已随 compose 首次启动自动执行（MySQL: schema → memory_schema → seed；PG: semantic → telemetry）
+- [ ] 数据库初始化脚本已执行（容器模式首次启动自动执行；本地服务需手动跑 init/*.sql，见 [deploy.md](./deploy.md)）
 - [ ] 管理员默认密码 `boluo123` 已修改（seed.sql 初始化）
+- [ ] 数据库字符集为 utf8mb4（init 脚本已内置 `SET NAMES utf8mb4`，勿删除）
 - [ ] 日志持久化（Docker 日志默认在 `/var/lib/docker/containers/`，建议配日志驱动）
 
 ## 其它详细设计说明

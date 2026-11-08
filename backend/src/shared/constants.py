@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 
 # ----------------------页面展示------------------------------
 DEFAULT_PAGE_NUM = 1
@@ -14,8 +15,9 @@ MAX_CODE_LENGTH = 50000
 # 用户数据位置，日志位置
 # ---------------------------------------------------------
 # 日志
-# 获得当前项目的绝对路径（src/shared/constants.py → 上跳 3 级为仓库根）
-ROOT_DIR = Path(__file__).resolve().parents[3]
+# 项目根目录：容器部署时源码扁平在 /app/src，需由 PROJECT_ROOT_DIR 显式指定；
+# 默认按仓库布局（backend/src/shared/constants.py → 上跳 3 级为仓库根）
+ROOT_DIR = Path(os.getenv("PROJECT_ROOT_DIR") or Path(__file__).resolve().parents[3])
 LOG_DIR = ROOT_DIR / "logs"  # 存放项目日志目录的绝对路径
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 LOG_FILE = LOG_DIR / "app.log"  # 存储日志的文件
@@ -33,7 +35,7 @@ LOG_FILE = LOG_DIR / "app.log"  # 存储日志的文件
       -- session
 """
 
-DATA_ROOT_DIR = Path(__file__).resolve().parents[3] / ".data"
+DATA_ROOT_DIR = ROOT_DIR / ".data"
 
 def get_runtime_app_dir(user_id: str | int, app_id: str | int) -> Path:
     # 用户/项目 两级目录：.data/{userId}/{appId}

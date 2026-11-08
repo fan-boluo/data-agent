@@ -257,15 +257,12 @@ def session_start(session: Any) -> None:
 
 
 async def session_end(session: Any) -> None:
-    """session 关闭：active 回落 + 时长直方图 + 未收口 turn 兜底落库 + store flush。"""
+    """session 关闭：active 回落 + 未收口 turn 兜底落库 + store flush。"""
     try:
         if not _cfg().enabled or session is None:
             return
-        started = getattr(session, "started_at", None)
-        duration_s = (time.time() - started.timestamp()) if started else 0.0
         trace_metrics.feed_session_end(
             app_id=str(getattr(session, "app_id", "") or "main"),
-            duration_s=duration_s,
         )
         trace_metrics.get_streak_tracker().cleanup_session(session.session_id)
         # 兜底：未正常 turn_end 的轮次全量落库

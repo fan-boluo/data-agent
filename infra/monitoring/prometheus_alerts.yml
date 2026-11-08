@@ -180,18 +180,3 @@ groups:
             Embedding circuit {{ $labels.circuit }} has been OPEN for over 30s.
             Memory vector sync / semantic vector recall are degraded to
             keyword-only until a half-open probe succeeds.
-
-      # -----------------------------------------------------------------------
-      # 12. LLM 熔断反复抖动（1h 内 OPEN 次数 >= 3，不属于真正恢复）
-      # -----------------------------------------------------------------------
-      - alert: LLMCircuitFlapping
-        expr: sum by (circuit) (increase(codegenx_llm_breaker_opens_total[1h])) >= 3
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "LLM circuit flapping: {{ $labels.circuit }}"
-          description: >
-            Circuit {{ $labels.circuit }} has opened {{ $value }} times in the
-            last hour. The upstream is unstable (intermittent success in
-            HALF_OPEN), not truly recovered.

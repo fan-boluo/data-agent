@@ -49,7 +49,7 @@ class Settings(BaseSettings):
     mysql_port: int = 3306
     mysql_user: str = "root"
     mysql_password: str = ""
-    mysql_db: str = "codegenx"
+    mysql_db: str = "dataagent"
     mysql_charset: str = "utf8mb4"
 
     # 用户项目数据库连接 postgres

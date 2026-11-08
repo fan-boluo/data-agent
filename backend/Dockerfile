@@ -9,8 +9,9 @@ WORKDIR /app
 # uv 安装器（0.8.5）
 COPY --from=ghcr.io/astral-sh/uv:0.8.5 /uv /usr/local/bin/uv
 
-# 先复制依赖声明 → 利用 Docker 层缓存
+# 依赖声明 + 项目源码（hatchling 打包需 src 在场，否则产出空 wheel）
 COPY pyproject.toml uv.lock ./
+COPY src ./src
 
 # 同步依赖到 .venv（包含项目包安装）
 RUN uv sync --frozen --no-dev
@@ -33,9 +34,12 @@ RUN apt-get update \
 
 WORKDIR /app
 
-# 从 builder 复制虚拟环境（已含所有依赖 + 项目代码）
+# 从 builder 复制虚拟环境（已含所有依赖 + 项目包 editable 安装）
 COPY --from=builder /app/.venv ./.venv
 ENV PATH="/app/.venv/bin:$PATH"
+
+# editable 安装的 .pth 指向 /app/src，运行时必须存在，否则 ModuleNotFoundError
+COPY src ./src
 
 # 复制配置文件 + 运行时数据目录占位
 COPY config.json ./config.json

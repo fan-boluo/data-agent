@@ -5,7 +5,7 @@
 - 业务失败：SQL 语法、参数错误等只上报指标与日志，不计入熔断，
   避免用户连续写错 SQL 把工具打成不可用；
 - 键为工具名，工具故障全局生效（与请求/应用无关）；
-- 指标：codegenx_tool_circuit_state{tool_name} / codegenx_tool_breaker_opens_total{tool_name}。
+- 指标：codegenx_tool_circuit_state{tool_name}（0=closed 1=half_open 2=open）。
 """
 from __future__ import annotations
 

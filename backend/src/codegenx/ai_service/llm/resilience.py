@@ -47,6 +47,13 @@ def _inc(name: str, **labels) -> None:
         pass
 
 
+def _dec(name: str, **labels) -> None:
+    try:
+        getattr(_metrics(), name).labels(**labels).dec()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _set_gauge(name: str, value: float, **labels) -> None:
     try:
         getattr(_metrics(), name).labels(**labels).set(value)
@@ -242,7 +249,6 @@ class CircuitBreaker:
             self._opened_at = time.monotonic()
             self._consecutive_failures = 0
             log.warning("[{}] {} OPEN（连续失败或探测失败）", self._log_tag, self.key)
-            _inc(f"{self._metric_prefix}_breaker_opens_total", **{self._metric_label: self.key})
         elif state == "closed":
             log.info("[{}] {} CLOSED（探测恢复）", self._log_tag, self.key)
         elif state == "half_open":
@@ -372,7 +378,8 @@ async def resilient_invoke(
     for idx, model in enumerate(chain):
         fallback_used = idx > 0
         if fallback_used:
-            _inc("llm_fallback_total", scenario=label, model=model)
+            # 降级状态 Gauge：model=主模型、target=实际降级到的模型、值=切换时刻
+            _set_gauge("llm_last_fallback_seconds", time.time(), model=chain[0], target=model)
         breaker = get_breaker(model)
         if not await breaker.acquire():
             log.warning("[llm] {} 熔断打开，跳过模型 {}（label={}）", chain[0], model, label)
@@ -400,6 +407,7 @@ async def resilient_invoke(
                 await breaker.record_success()
                 _record_usage(model, usage)
                 _record_call(label, model, None, (time.monotonic() - t0) * 1000, 0.0)
+                _set_gauge("llm_last_retries", attempt, model=model)
                 _log_call(label, model, attempt, time.monotonic() - t0, "ok", fallback_used)
                 return llm_response
             except asyncio.CancelledError:
@@ -416,16 +424,20 @@ async def resilient_invoke(
                 if cls is LLMErrorClass.LOGIC:
                     raise  # 本地 bug：立即暴露
                 if cls is not LLMErrorClass.RETRYABLE:
+                    _set_gauge("llm_last_retries", attempt, model=model)
                     break  # OVERFLOW/FATAL：不重试，下一级模型
                 if attempt >= max_attempts:
+                    _set_gauge("llm_last_retries", attempt, model=model)
                     break  # 重试耗尽：下一级模型
                 delay = _backoff_delay(attempt, exc)
                 log.warning(
                     "[llm] label={} model={} 瞬态错误({})，{:.1f}s 后重试（{}/{}）: {}",
                     label, model, cls.value, delay, attempt + 1, max_attempts, exc,
                 )
-                _inc("llm_retry_total", scenario=label, model=model)
+                # 重试中状态：退避等待期 +1，醒来 -1（并发下反映"此刻有几个调用在挣扎"）
+                _inc("llm_retrying", model=model)
                 await asyncio.sleep(delay)
+                _dec("llm_retrying", model=model)
 
     if last_exc is not None:
         raise last_exc
@@ -459,7 +471,8 @@ async def resilient_invoke_stream(
     for idx, model in enumerate(chain):
         fallback_used = idx > 0
         if fallback_used:
-            _inc("llm_fallback_total", scenario=label, model=model)
+            # 降级状态 Gauge：model=主模型、target=实际降级到的模型、值=切换时刻
+            _set_gauge("llm_last_fallback_seconds", time.time(), model=chain[0], target=model)
         breaker = get_breaker(model)
         if not await breaker.acquire():
             log.warning("[llm] {} 熔断打开，跳过模型 {}（label={}）", chain[0], model, label)
@@ -501,6 +514,7 @@ async def resilient_invoke_stream(
                     span.set_output({"content": "".join(content_parts), "tool_calls": tool_calls_meta})
                 await breaker.record_success()
                 _record_call(label, model, None, (time.monotonic() - t0) * 1000, first_token_ms)
+                _set_gauge("llm_last_retries", attempt, model=model)
                 _log_call(label, model, attempt, time.monotonic() - t0, "ok", fallback_used)
                 return
             except asyncio.CancelledError:
@@ -522,16 +536,20 @@ async def resilient_invoke_stream(
                 if cls is LLMErrorClass.LOGIC:
                     raise
                 if cls is not LLMErrorClass.RETRYABLE:
+                    _set_gauge("llm_last_retries", attempt, model=model)
                     break
                 if attempt >= max_attempts:
+                    _set_gauge("llm_last_retries", attempt, model=model)
                     break
                 delay = _backoff_delay(attempt, exc)
                 log.warning(
                     "[llm] label={} model={} 流式瞬态错误({})，{:.1f}s 后重试（{}/{}）: {}",
                     label, model, cls.value, delay, attempt + 1, max_attempts, exc,
                 )
-                _inc("llm_retry_total", scenario=label, model=model)
+                # 重试中状态：退避等待期 +1，醒来 -1（并发下反映"此刻有几个调用在挣扎"）
+                _inc("llm_retrying", model=model)
                 await asyncio.sleep(delay)
+                _dec("llm_retrying", model=model)
 
     if last_exc is not None:
         raise last_exc

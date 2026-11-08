@@ -1,3 +1,5 @@
+SET NAMES utf8mb4;
+
 -- 初始化数据插入
 
 -- 初始化用户admin 密码boluo123

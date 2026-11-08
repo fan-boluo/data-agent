@@ -1,3 +1,6 @@
+-- 客户端字符集：官方镜像入口默认 latin1 导入，中文会被二次编码（页面显示乱码）
+SET NAMES utf8mb4;
+
 -- 创建库
 create database if not exists dataagent;
 

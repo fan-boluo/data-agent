@@ -1,18 +1,30 @@
 <template>
   <div class="app-chrome">
-    <!-- 左侧边栏：logo + 竖排菜单（仅登录后可见） -->
-    <aside v-if="loginUserStore.loginUser.id" class="app-sider">
+    <!-- 左侧边栏：logo + 竖排菜单（仅登录后可见），支持折叠 -->
+    <aside v-if="loginUserStore.loginUser.id" class="app-sider" :class="{ collapsed }">
       <a class="sider-logo" href="/" @click.prevent="$router.push('/')">
-        <span class="logo-text">数据分析平台</span>
+        <BarChartOutlined class="logo-mark" />
+        <span v-show="!collapsed" class="logo-text">数据分析平台</span>
       </a>
       <a-menu
         v-if="menuItems?.length"
         v-model:selectedKeys="selectedKeys"
         mode="inline"
+        :inline-collapsed="collapsed"
         :items="menuItems"
         class="sider-menu"
         @click="handleMenuClick"
       />
+      <a-button
+        type="text"
+        class="sider-collapse-btn"
+        :title="collapsed ? '展开菜单' : '收起菜单'"
+        @click="toggleCollapsed"
+      >
+        <MenuUnfoldOutlined v-if="collapsed" />
+        <MenuFoldOutlined v-else />
+        <span v-show="!collapsed" class="collapse-text">收起</span>
+      </a-button>
     </aside>
 
     <div class="app-main">
@@ -72,11 +84,22 @@ import {
   AppstoreOutlined,
   UserOutlined,
   DashboardOutlined,
+  BarChartOutlined,
+  MenuFoldOutlined,
+  MenuUnfoldOutlined,
 } from '@ant-design/icons-vue'
 
 const loginUserStore = useLoginUserStore()
 const router = useRouter()
 const route = useRoute()
+
+// 侧边栏折叠状态：本地持久化，刷新后保持
+const COLLAPSE_KEY = 'codegenx:sider-collapsed'
+const collapsed = ref(localStorage.getItem(COLLAPSE_KEY) === '1')
+const toggleCollapsed = () => {
+  collapsed.value = !collapsed.value
+  localStorage.setItem(COLLAPSE_KEY, collapsed.value ? '1' : '0')
+}
 
 // 菜单选中态跟随路由（刷新/直接访问深链也能高亮）
 const selectedKeys = ref<string[]>([route.path])
@@ -179,15 +202,34 @@ const doLogout = async () => {
   backdrop-filter: blur(12px) saturate(1.4);
   -webkit-backdrop-filter: blur(12px) saturate(1.4);
   border-right: 1px solid var(--border-light);
+  transition: width 0.2s var(--ease-out);
+}
+
+/* 折叠态：仅保留图标 */
+.app-sider.collapsed {
+  width: 64px;
 }
 
 .sider-logo {
   display: flex;
   align-items: center;
+  gap: 8px;
   height: var(--header-height);
-  padding: 0 20px;
+  padding: 0 16px;
   text-decoration: none;
   white-space: nowrap;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+.app-sider.collapsed .sider-logo {
+  padding: 0;
+  justify-content: center;
+}
+
+.logo-mark {
+  font-size: 20px;
+  color: var(--accent-primary);
   flex-shrink: 0;
 }
 
@@ -228,6 +270,44 @@ const doLogout = async () => {
 
 .sider-menu :deep(.ant-menu-item::after) {
   display: none;
+}
+
+/* 折叠态：图标居中，收回自定义内边距 */
+.app-sider.collapsed .sider-menu {
+  padding: 8px 4px;
+}
+
+.app-sider.collapsed .sider-menu.ant-menu-inline-collapsed
+  :deep(.ant-menu-item) {
+  padding-inline: calc(50% - 8px) !important;
+  text-align: center;
+}
+
+/* 底部折叠/展开按钮 */
+.sider-collapse-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 40px;
+  margin: 8px;
+  flex-shrink: 0;
+  color: var(--text-secondary);
+  border-top: 1px solid var(--border-light);
+  border-radius: 0;
+}
+
+.sider-collapse-btn:hover {
+  color: var(--accent-primary);
+  background: var(--accent-primary-light);
+}
+
+.app-sider.collapsed .sider-collapse-btn {
+  margin: 8px 4px;
+}
+
+.collapse-text {
+  font-size: 13px;
 }
 
 /* ---- 右侧主区 ---- */
