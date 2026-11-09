@@ -141,6 +141,42 @@ class MonitorCleanupSummary(CamelBaseModel):
     table_results: list[MonitorCleanupTableResult] = Field(default_factory=list, alias="tableResults")
 
 
+class MonitorToolDailyStat(CamelBaseModel):
+    """单个工具在某一自然日的执行统计（Asia/Shanghai 口径）。"""
+
+    tool_name: str = Field(alias="toolName")
+    date: str = ""
+    total: int = 0
+    success: int = 0
+    failure: int = 0
+
+
+class MonitorToolDailyStats(CamelBaseModel):
+    """近 N 天工具执行统计：日期轴 + 工具×日的明细。"""
+
+    days: int = 7
+    dates: list[str] = Field(default_factory=list)
+    records: list[MonitorToolDailyStat] = Field(default_factory=list)
+
+
+class MonitorLlmDailyStat(CamelBaseModel):
+    """单个模型在某一自然日的调用统计（Asia/Shanghai 口径）。"""
+
+    model_name: str = Field(alias="modelName")
+    date: str = ""
+    total: int = 0
+    success: int = 0
+    failure: int = 0
+
+
+class MonitorLlmDailyStats(CamelBaseModel):
+    """近 N 天模型调用统计：日期轴 + 模型×日的明细。"""
+
+    days: int = 7
+    dates: list[str] = Field(default_factory=list)
+    records: list[MonitorLlmDailyStat] = Field(default_factory=list)
+
+
 class TokenUsageQueryRequest(PageRequest):
     start_time: datetime | None = Field(default=None, alias="startTime")
     end_time: datetime | None = Field(default=None, alias="endTime")

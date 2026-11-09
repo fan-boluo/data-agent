@@ -34,7 +34,7 @@ uv单体架构
 | 后端框架 | FastAPI (Python 3.12) |
 | 数据库 | PostgreSQL 16 (SQLAlchemy + asyncpg 异步) + MySQL 8.0 |
 | 缓存 | Redis 7 |
-| 向量存储 | Qdrant |
+| 向量存储 | pgvector（PostgreSQL 扩展，记忆向量与行同表） |
 | 监控 | Prometheus |
 | 容器化 | Docker Compose |
 
@@ -43,9 +43,8 @@ uv单体架构
 | 组件 | 用途 |
 |---|---|
 | **Redis** | 限流（固定窗口 INCR+EXPIRE）、记忆缓存 |
-| **MySQL** | 用户类数据、记忆真源 |
-| **PostgreSQL** | 用户项目库、公共库、语义层、监控存储（主业务数据库） |
-| **Qdrant** | Warm 层记忆向量检索、语义表卡向量检索 |
+| **MySQL** | 平台业务表（用户 / 应用 / 项目成员） |
+| **PostgreSQL** | 用户项目库、公共库、语义层、监控存储、记忆真源 + 向量（pgvector）、交互记录（月分区） |
 
 ## 模块说明（uv 单体架构，后续扩展可以拆分微服务）
 
@@ -57,7 +56,7 @@ backend/src/codegenx/
 ├── app_service/          # 项目管理模块（代码文件、脚本运行、数据库）
 ├── ai_service/           # AI 核心（Agent Runtime / Hook / Memory / Tool / Trace）
 ├── shared/               # 共享（配置、异常、工具函数）
-├── db/                   # 基础设施客户端（MySQL / PostgreSQL / Redis / Qdrant）
+├── db/                   # 基础设施客户端（MySQL / PostgreSQL / Redis）
 └── tests/                # 测试
 ```
 
@@ -179,9 +178,9 @@ agent-as-tool 多智能体协作架构 + 分层韧性 + 事件驱动观测
           ▼                ▼                ▼
 ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
 │  Hot Memory     │ │  Warm Memory    │ │  Semantic Layer  │
-│  (MySQL 真源)   │ │  (Qdrant 向量)  │ │  (PostgreSQL +   │
-│  衰减/归档/     │ │  关键词/主题     │ │   pgvector)      │
-│  定时一致性校验 │ │  召回 + 合成     │ │  表卡/列/键/指标 │
+│  (PG 真源)      │ │  (pgvector 同表)│ │  (PostgreSQL +   │
+│  衰减/归档/     │ │  向量/关键词     │ │   pgvector)      │
+│  类型优先级裁剪 │ │  召回 + 合成     │ │  表卡/列/键/指标 │
 │                 │ │                 │ │  向量化语义检索  │
 └─────────────────┘ └─────────────────┘ └─────────────────┘
           │
@@ -204,7 +203,7 @@ agent-as-tool 多智能体协作架构 + 分层韧性 + 事件驱动观测
 | 工具系统 | 26 个工具 + Hook 参数守卫 + 工具白名单按 agent 粒度 | — |
 | 韧性层 | 三态熔断器（状态机+asyncio.Lock 串行化）· 四分类错误处理 · 多模型 fallback 链 | OpenAI 兼容协议 |
 | 观测 | Hook 事件系统 · Trace Span 采集 · SQL trace 自动标记 | Prometheus · Grafana |
-| 记忆 | Hot/Warm 分层 · 衰减/归档/定时校验 · Token 预算管控 · 会话摘要自动提取 | MySQL · Qdrant |
+| 记忆 | Hot/Warm 分层 · 衰减/归档 · Token 预算管控 · 会话摘要自动提取 | PostgreSQL · pgvector |
 | 语义层 | 表卡/列/键/指标提取 + 向量化 · Hybrid 检索（向量+关键词）· pgvector | PostgreSQL · pgvector |
 | 评测 | REPLAY/SCORE/REPORT 流水线 · Valid/EX/VES 指标 · 失败归因分类 | — |
 
@@ -222,7 +221,7 @@ agent-as-tool 多智能体协作架构 + 分层韧性 + 事件驱动观测
 | **LLM Resilience** | CircuitBreaker 三态状态机按 (provider:model) 粒度独立熔断；RETRYABLE/OVRFLOW/FATAL/LOGIC 四分类 |
 | **Tool System** | 26 工具：语义检索 / SQL沙箱 / Python沙箱 / 文件操作 / 看板管理 / Agent派发 / Skill加载 |
 | **Hook System** | 生命周期 Hook：before_tool_call / after_tool_call / on_turn_end / on_session_end；SQL trace 自动采集 |
-| **Memory System** | Hot(MySQL 真源) · Warm(Qdrant 向量召回) · Session(当前会话)；衰减/归档/定时校验/Token 管控 |
+| **Memory System** | Hot(确定性全量注入) · Warm(pgvector 语义召回) · Session(当前会话)；单表真源，向量与行同事务，衰减/归档/Token 管控 |
 | **Semantic Layer** | PostgreSQL 表卡(列/类型/注释/主键) + 业务指标向量化；search_tables / describe_table_card / find_join_path |
 | **Trace System** | 全链路 Span 采集（request→agent→tool→sql→llm）；Prometheus 指标暴露（LLM 调用/熔断状态/Token 消耗） |
 | **Eval Pipeline** | REPLAY/SCORE/REPORT 三步流水线；Valid/EX/VES 指标；失败归因（result_mismatch/SQL_error/timeout/context_overflow） |
@@ -236,11 +235,10 @@ python虚拟环境所在位置: .venv\Scripts\pyhton.exe
 - Python 3.12+
 - Node.js 20+
 - MySQL 8.0
-- PostgreSQL 16
+- PostgreSQL 16（含 pgvector 0.8+、pg_trgm 扩展）
 - Redis 7
-- Qdrant
 
-> 启动 Mysql、PostgreSQL、Redis、Qdrant、Prometheus
+> 启动 MySQL、PostgreSQL、Redis、Prometheus
 复制backend/.env.example为backend/.env.env,backend/config.json.example为config.json
 修改配置文件中的参数为实际参数 ：
  系统参数：backend/.env 
@@ -288,8 +286,9 @@ cp .env.example .env
 docker compose --profile localdb --profile monitoring up -d --build
 
 # 3) 首次启动（数据卷为空）自动按序执行 init/：
-#      MySQL     : schema.sql（建库 dataagent）→ memory_schema.sql → seed.sql（admin / boluo123）
+#      MySQL     : schema.sql（建库 dataagent：用户/应用/成员）→ seed.sql（admin / boluo123）
 #      PostgreSQL: semantic_schema.sql（语义层 + pgvector）→ telemetry_schema.sql
+#                  → pg_memory_schema.sql（记忆 + 交互记录月分区）
 docker compose logs mysql | Select-String "initdb"
 
 # 4) 验证
@@ -299,14 +298,14 @@ docker compose exec -T mysql mysql -uroot -p"<root密码>" --default-character-s
 ```
 
 > 后端默认通过 `host.docker.internal` 访问宿主机数据服务。全容器模式需先把 compose 中
-> backend 的 `MYSQL_HOST / POSTGRES_HOST / REDIS_HOST / QDRANT_URL` 改为服务名
-> （`mysql / postgres / redis / qdrant`），并恢复对这四个服务的 `depends_on` 健康检查。
+> backend 的 `MYSQL_HOST / POSTGRES_HOST / REDIS_HOST` 改为服务名
+> （`mysql / postgres / redis`），并恢复对这三个服务的 `depends_on` 健康检查。
 
 > **初始化说明**
 > - 自动初始化仅在数据卷为空时触发；已有数据卷请手动补跑 init 脚本。
 > - `seed.sql` 内置管理员 `admin / boluo123`，**上线前务必修改密码**。
 > - 数据库默认端口与本地服务冲突时，可在根 `.env` 调整 `MYSQL_HOST_PORT` /
->   `POSTGRES_HOST_PORT` / `REDIS_HOST_PORT` / `QDRANT_HOST_PORT`。
+>   `POSTGRES_HOST_PORT` / `REDIS_HOST_PORT`。
 
 > 当前开发环境的混合部署方式（数据服务用宿主机、前后端与监控用 Docker）及常用运维命令，
 > 见 [deploy.md](./deploy.md)。
@@ -321,25 +320,25 @@ docker compose exec -T mysql mysql -uroot -p"<root密码>" --default-character-s
 | **grafana** | `grafana/grafana` | 3000 | monitoring | 看板 `dataagent-overview` |
 | **alertmanager** | `prom/alertmanager` | 9093 | monitoring | 告警路由 |
 | **alert-sink** | 自研 | 9000 | monitoring | 接收 webhook 告警 |
-| **mysql** | `mysql:8.0` | 3307 → 3306 | localdb | 用户类数据 + 记忆真源（utf8mb4） |
-| **postgres** | `pgvector/pgvector:pg16` | 5433 → 5432 | localdb | 主业务库 + 语义层 + pgvector |
+| **mysql** | `mysql:8.0` | 3307 → 3306 | localdb | 平台业务表：用户 / 应用 / 成员（utf8mb4） |
+| **postgres** | `pgvector/pgvector:pg16` | 5433 → 5432 | localdb | 主业务库 + 语义层 + 记忆真源 + 交互记录（含 pgvector） |
 | **redis** | `redis:7-alpine` | 6380 → 6379 | localdb | 缓存 + 限流 |
-| **qdrant** | `qdrant/qdrant` | 6333（HTTP）/ 6334（gRPC） | localdb | 向量存储 |
 
 > `localdb` 组的宿主机端口刻意避开 3306 / 5432 / 6379，防止与本地已安装的数据库冲突。
 > 端口均可通过根 `.env` 覆盖。
 
 #### 数据持久化
 
-compose 定义 5 个 named volume（数据服务运行在容器内时生效），容器重建不会丢数据：
+compose 定义 6 个 named volume（数据服务运行在容器内时生效），容器重建不会丢数据：
 
 | Volume | 挂载路径 | 内容 |
 |---|---|---|
-| `dataagent_mysql_data` | `/var/lib/mysql` | MySQL 数据（用户类数据、记忆真源） |
-| `dataagent_pg_data` | `/var/lib/postgresql/data` | PostgreSQL 主库 |
+| `dataagent_mysql_data` | `/var/lib/mysql` | MySQL 数据（平台业务表） |
+| `dataagent_pg_data` | `/var/lib/postgresql/data` | PostgreSQL 主库（语义层 + 记忆 + 交互记录） |
 | `dataagent_redis_data` | `/data` | Redis AOF 持久化 |
-| `dataagent_qdrant_data` | `/qdrant/storage` | Qdrant 向量数据 |
-| `dataagent_data` | 后端容器 `/data` | 看板 JSON / 会话快照 / chat_message |
+| `dataagent_data` | 后端容器 `/data` | 看板 JSON / 会话快照 / 归档 zip |
+| `dataagent_prometheus_data` | `/prometheus` | Prometheus TSDB（15d 保留） |
+| `dataagent_grafana_data` | `/var/lib/grafana` | Grafana 看板/用户配置 |
 
 
 
@@ -353,11 +352,11 @@ DataAgent/
 ├── .env.example                  # 根变量模板
 ├── deploy.md                     # 当前混合部署方式与常用运维
 ├── init/                         # 数据库初始化脚本
-│   ├── schema.sql                # MySQL：建库 dataagent + 业务表
-│   ├── memory_schema.sql         # MySQL：记忆系统表
+│   ├── schema.sql                # MySQL：建库 dataagent + 业务表（用户/应用/成员）
 │   ├── seed.sql                  # MySQL：初始化 admin 用户
 │   ├── semantic_schema.sql       # PostgreSQL：语义层 + pgvector
-│   └── telemetry_schema.sql      # PostgreSQL：监控 telemetry
+│   ├── telemetry_schema.sql      # PostgreSQL：监控 telemetry
+│   └── pg_memory_schema.sql      # PostgreSQL：记忆（pgvector）+ 交互记录月分区
 │
 ├── backend/
 │   ├── Dockerfile                # 多阶段构建（builder 安装依赖 → slim 运行）

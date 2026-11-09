@@ -84,6 +84,7 @@ import {
   AppstoreOutlined,
   UserOutlined,
   DashboardOutlined,
+  LineChartOutlined,
   BarChartOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
@@ -134,6 +135,12 @@ const originItems: MenuProps['items'] = [
     icon: () => h(DashboardOutlined),
     label: '运行追踪',
     title: '运行追踪',
+  },
+  {
+    key: '/admin/toolStats',
+    icon: () => h(LineChartOutlined),
+    label: '运行统计',
+    title: '运行统计',
   },
 ]
 

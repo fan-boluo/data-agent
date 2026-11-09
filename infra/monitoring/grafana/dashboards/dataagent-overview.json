@@ -5,7 +5,7 @@
     "DataAgent",
     "agent"
   ],
-  "timezone": "browser",
+  "timezone": "Asia/Shanghai",
   "schemaVersion": 39,
   "version": 4,
   "refresh": "30s",
@@ -36,7 +36,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "count(codegenx_llm_circuit_state == 2) or vector(0)",
+          "expr": "count(count by (circuit) (codegenx_llm_circuit_state == 2)) or vector(0)",
           "instant": true
         }
       ],
@@ -89,7 +89,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "codegenx_llm_circuit_state",
+          "expr": "max by (circuit) (codegenx_llm_circuit_state)",
           "legendFormat": "{{circuit}}"
         }
       ],
@@ -167,7 +167,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "count(codegenx_tool_circuit_state == 2) or vector(0)",
+          "expr": "count(count by (tool_name) (codegenx_tool_circuit_state == 2)) or vector(0)",
           "instant": true
         }
       ],
@@ -211,7 +211,7 @@
       "id": 20,
       "type": "table",
       "title": "模型健康矩阵（LLM + Embedding）",
-      "description": "当前状态全貌：熔断 / 重试中 / 上次重试次数 / 降级至 / 最近失败 / 7d请求 / P95延迟 / P95首Token。列为空 = 未发生或无流量。",
+      "description": "当前状态全貌：熔断 / 重试中 / 上次重试次数 / 降级至 / 最近失败（含 trace_id 与分类）。P95 与首 Token 已在下方时序图展示，此处不重复；请求量趋势由前端出图。",
       "gridPos": {
         "x": 0,
         "y": 6,
@@ -225,7 +225,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "label_replace(codegenx_llm_circuit_state, \"model\", \"$1\", \"circuit\", \".+:(.+)\") or label_replace(codegenx_embedding_circuit_state, \"model\", \"$1\", \"circuit\", \".+:(.+)\")",
+          "expr": "label_replace(max by (circuit) (codegenx_llm_circuit_state), \"model\", \"$1\", \"circuit\", \".+:(.+)\") or label_replace(max by (circuit) (codegenx_embedding_circuit_state), \"model\", \"$1\", \"circuit\", \".+:(.+)\")",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -261,7 +261,7 @@
         },
         {
           "refId": "D",
-          "expr": "codegenx_llm_last_fallback_seconds",
+          "expr": "max by (model, target) (codegenx_llm_last_fallback_seconds) or (label_replace(0 * (label_replace(max by (circuit) (codegenx_llm_circuit_state or codegenx_embedding_circuit_state), \"model\", \"$1\", \"circuit\", \".+:(.+)\")), \"target\", \"-\", \"model\", \".*\") unless on (model) max by (model) (codegenx_llm_last_fallback_seconds))",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -273,7 +273,7 @@
         },
         {
           "refId": "E",
-          "expr": "(max by (model) (codegenx_llm_last_failure_seconds) or max by (model) (codegenx_embedding_last_failure_seconds)) * 1000",
+          "expr": "((max by (model) (codegenx_llm_last_failure_seconds) or max by (model) (codegenx_embedding_last_failure_seconds)) * 1000) or (0 * (label_replace(max by (circuit) (codegenx_llm_circuit_state or codegenx_embedding_circuit_state), \"model\", \"$1\", \"circuit\", \".+:(.+)\")))",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -285,31 +285,7 @@
         },
         {
           "refId": "F",
-          "expr": "sum by (model) (increase(codegenx_llm_calls_total[7d])) or sum by (model) (increase(codegenx_embedding_calls_total[7d]))",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "editorMode": "code",
-          "range": false,
-          "instant": true,
-          "format": "table"
-        },
-        {
-          "refId": "G",
-          "expr": "histogram_quantile(0.95, sum by (le, model) (rate(codegenx_llm_latency_seconds_bucket[$__rate_interval]))) or histogram_quantile(0.95, sum by (le, model) (rate(codegenx_embedding_latency_seconds_bucket[$__rate_interval])))",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "editorMode": "code",
-          "range": false,
-          "instant": true,
-          "format": "table"
-        },
-        {
-          "refId": "H",
-          "expr": "histogram_quantile(0.95, sum by (le, model) (rate(codegenx_llm_first_token_seconds_bucket[$__rate_interval])))",
+          "expr": "max by (model, error_class, trace_id) (codegenx_llm_last_failure_info) or max by (model, error_class, trace_id) (codegenx_embedding_last_failure_info) or (label_replace(label_replace(0 * (label_replace(max by (circuit) (codegenx_llm_circuit_state or codegenx_embedding_circuit_state), \"model\", \"$1\", \"circuit\", \".+:(.+)\")), \"error_class\", \"-\", \"model\", \".*\"), \"trace_id\", \"-\", \"model\", \".*\") unless on (model) (max by (model) (codegenx_llm_last_failure_info) or max by (model) (codegenx_embedding_last_failure_info)))",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -341,8 +317,8 @@
             },
             "renameByName": {
               "model": "模型",
-              "circuit": "熔断键",
-              "target": "降级至"
+              "target": "降级至",
+              "error_class": "失败分类"
             }
           }
         }
@@ -464,6 +440,20 @@
               {
                 "id": "unit",
                 "value": "dateTimeAsIso"
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "-",
+                        "index": 0
+                      }
+                    }
+                  }
+                ]
               }
             ]
           },
@@ -474,44 +464,20 @@
             },
             "properties": [
               {
-                "id": "displayName",
-                "value": "近7天请求数"
-              },
-              {
-                "id": "unit",
-                "value": "short"
+                "id": "custom.hidden",
+                "value": true
               }
             ]
           },
           {
             "matcher": {
               "id": "byName",
-              "options": "Value #G"
+              "options": "trace_id"
             },
             "properties": [
               {
-                "id": "displayName",
-                "value": "P95延迟"
-              },
-              {
-                "id": "unit",
-                "value": "s"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Value #H"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "P95首Token"
-              },
-              {
-                "id": "unit",
-                "value": "s"
+                "id": "custom.width",
+                "value": 300
               }
             ]
           }
@@ -535,7 +501,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (model) (rate(codegenx_llm_calls_total{outcome=\"ok\"}[$__rate_interval]))",
+          "expr": "sum by (model) (rate(codegenx_llm_calls_total{outcome=\"ok\"}[1h]))",
           "legendFormat": "{{model}}"
         }
       ],
@@ -566,7 +532,7 @@
     {
       "id": 22,
       "type": "timeseries",
-      "title": "模型 5m 错误率（>20% 触发告警）",
+      "title": "模型错误率（5m 窗口）",
       "gridPos": {
         "x": 12,
         "y": 15,
@@ -643,17 +609,17 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.5, sum by (le, model) (rate(codegenx_llm_latency_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.5, sum by (le, model) (rate(codegenx_llm_latency_seconds_bucket[1h])))",
           "legendFormat": "{{model}} · P50"
         },
         {
           "refId": "B",
-          "expr": "histogram_quantile(0.95, sum by (le, model) (rate(codegenx_llm_latency_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le, model) (rate(codegenx_llm_latency_seconds_bucket[1h])))",
           "legendFormat": "{{model}} · P95"
         },
         {
           "refId": "E95",
-          "expr": "histogram_quantile(0.95, sum by (le, model) (rate(codegenx_embedding_latency_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le, model) (rate(codegenx_embedding_latency_seconds_bucket[1h])))",
           "legendFormat": "emb {{model}} P95",
           "datasource": {
             "type": "prometheus",
@@ -724,12 +690,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.5, sum by (le, model) (rate(codegenx_llm_first_token_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.5, sum by (le, model) (rate(codegenx_llm_first_token_seconds_bucket[1h])))",
           "legendFormat": "{{model}} · P50"
         },
         {
           "refId": "B",
-          "expr": "histogram_quantile(0.95, sum by (le, model) (rate(codegenx_llm_first_token_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le, model) (rate(codegenx_llm_first_token_seconds_bucket[1h])))",
           "legendFormat": "{{model}} · P95"
         }
       ],
@@ -794,7 +760,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (model) (rate(codegenx_llm_completion_tokens_total[$__rate_interval])) / clamp_min(sum by (model) (rate(codegenx_llm_latency_seconds_sum[$__rate_interval])), 1e-9)",
+          "expr": "sum by (model) (rate(codegenx_llm_completion_tokens_total[1h])) / clamp_min(sum by (model) (rate(codegenx_llm_latency_seconds_sum[1h])), 1e-9)",
           "legendFormat": "{{model}}"
         }
       ],
@@ -839,7 +805,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "codegenx_embedding_last_failure_seconds * 1000",
+          "expr": "max by (model, error_class) (codegenx_embedding_last_failure_seconds) * 1000",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -906,77 +872,10 @@
       ]
     },
     {
-      "id": 14,
-      "type": "table",
-      "title": "工具执行错误明细（telemetry，随看板时间范围）",
-      "gridPos": {
-        "x": 8,
-        "y": 44,
-        "w": 16,
-        "h": 8
-      },
-      "datasource": {
-        "type": "postgres",
-        "uid": "telemetry-pg"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "format": "table",
-          "rawQuery": true,
-          "rawSql": "SELECT started_at AS \"时间\", name AS \"工具\", error AS \"错误信息\", input->>'tool_call_id' AS tool_call_id, session_id, trace_id FROM telemetry.trace_spans WHERE status = 'error' AND op_type IN ('tool','retrieval') AND $__timeFilter(started_at) ORDER BY started_at DESC LIMIT 200"
-        }
-      ],
-      "options": {
-        "showHeader": true,
-        "cellHeight": "sm"
-      },
-      "fieldConfig": {
-        "defaults": {},
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "时间"
-            },
-            "properties": [
-              {
-                "id": "custom.width",
-                "value": 170
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "工具"
-            },
-            "properties": [
-              {
-                "id": "custom.width",
-                "value": 160
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "tool_call_id"
-            },
-            "properties": [
-              {
-                "id": "custom.width",
-                "value": 200
-              }
-            ]
-          }
-        ]
-      }
-    },
-    {
       "id": 11,
       "type": "timeseries",
       "title": "工具延迟 P95（TOP6）",
+      "description": "窗口 6h。窗口内无调用的工具不会有线（断点是流量稀疏，不是指标缺失）；注意 dispatch_agent 含子 agent 全流程耗时，天然比普通工具大。",
       "gridPos": {
         "x": 0,
         "y": 36,
@@ -990,7 +889,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "topk(6, histogram_quantile(0.95, sum by (le, tool_name) (rate(codegenx_tool_latency_seconds_bucket[$__rate_interval]))))",
+          "expr": "topk(6, histogram_quantile(0.95, sum by (le, tool_name) (rate(codegenx_tool_latency_seconds_bucket{tool_name!=\"dispatch_agent\"}[6h]))))",
           "legendFormat": "{{tool_name}}"
         }
       ],
@@ -1035,7 +934,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "codegenx_tool_circuit_state",
+          "expr": "max by (tool_name) (codegenx_tool_circuit_state)",
           "legendFormat": "{{tool_name}}"
         }
       ],
@@ -1099,7 +998,7 @@
     {
       "id": 23,
       "title": "活跃会话",
-      "description": "当前运行中的会话数（池子水位）",
+      "description": "当前运行中的会话数 / 会话池上限（上限 100 暂为硬编码）",
       "type": "stat",
       "gridPos": {
         "x": 4,
@@ -1110,7 +1009,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(codegenx_active_sessions)",
+          "expr": "codegenx_active_sessions",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -1147,127 +1046,25 @@
                 "value": null
               },
               {
+                "color": "yellow",
+                "value": 80
+              },
+              {
                 "color": "red",
-                "value": 10
+                "value": 100
               }
             ]
-          }
+          },
+          "unit": "suffix: / 100",
+          "decimals": 0
         },
         "overrides": []
-      },
-      "transformations": [
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {
-              "Time": true,
-              "__name__": true
-            },
-            "renameByName": {
-              "tool_name": "工具",
-              "model": "模型",
-              "error_class": "失败分类"
-            }
-          }
-        }
-      ]
-    },
-    {
-      "id": 24,
-      "title": "工具 7d 调用量",
-      "description": "近 7 天各工具调用次数（识别哪些工具几乎没被用）",
-      "type": "table",
-      "gridPos": {
-        "x": 16,
-        "y": 29,
-        "w": 8,
-        "h": 7
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum by (tool_name) (increase(codegenx_tool_calls_total[7d]))",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "editorMode": "code",
-          "range": false,
-          "instant": true,
-          "format": "table"
-        }
-      ],
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "options": {
-        "showHeader": true,
-        "cellHeight": "sm"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "align": "auto"
-          },
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Value #A"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "7d调用"
-              },
-              {
-                "id": "unit",
-                "value": "short"
-              }
-            ]
-          }
-        ]
-      },
-      "transformations": [
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {
-              "Time": true,
-              "__name__": true
-            },
-            "renameByName": {
-              "tool_name": "工具",
-              "model": "模型",
-              "error_class": "失败分类"
-            }
-          }
-        }
-      ]
+      }
     },
     {
       "id": 25,
       "title": "工具当前连续失败",
-      "description": "此刻还在连续失败的工具（任一成功即清零）；为空表示全部正常",
+      "description": "此刻还在连续失败的工具（任一成功即清零）；起始时间=本轮第一次失败，最近失败=本轮最后一次失败；trace_id 可在 telemetry.trace_spans 反查当次入参与异常",
       "type": "table",
       "gridPos": {
         "x": 16,
@@ -1278,7 +1075,43 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "codegenx_tool_failure_streak > 0",
+          "expr": "max by (tool_name) (codegenx_tool_failure_streak) > 0",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "refId": "B",
+          "expr": "(max by (tool_name) (codegenx_tool_failure_streak_since_seconds) * 1000) > 0",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "refId": "C",
+          "expr": "(max by (tool_name) (codegenx_tool_failure_last_seconds) * 1000) > 0",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "refId": "D",
+          "expr": "max by (tool_name, trace_id, error_class) (codegenx_tool_last_failure_info) > 0",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -1334,89 +1167,33 @@
               {
                 "id": "unit",
                 "value": "short"
-              }
-            ]
-          }
-        ]
-      },
-      "transformations": [
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {
-              "Time": true,
-              "__name__": true
-            },
-            "renameByName": {
-              "tool_name": "工具",
-              "model": "模型",
-              "error_class": "失败分类"
-            }
-          }
-        }
-      ]
-    },
-    {
-      "id": 26,
-      "title": "工具最近失败时间",
-      "description": "每个工具最近一次失败的时刻与分类（arg_invalid=LLM入参 execution=执行失败 timeout=超时）",
-      "type": "table",
-      "gridPos": {
-        "x": 0,
-        "y": 44,
-        "w": 8,
-        "h": 8
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "codegenx_tool_last_failure_seconds * 1000",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "editorMode": "code",
-          "range": false,
-          "instant": true,
-          "format": "table"
-        }
-      ],
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "options": {
-        "showHeader": true,
-        "cellHeight": "sm"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "align": "auto"
-          },
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
               },
               {
-                "color": "red",
-                "value": 80
+                "id": "decimals",
+                "value": 0
               }
             ]
-          }
-        },
-        "overrides": [
+          },
           {
             "matcher": {
               "id": "byName",
-              "options": "Value #A"
+              "options": "Value #B"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "起始时间"
+              },
+              {
+                "id": "unit",
+                "value": "dateTimeAsIso"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #C"
             },
             "properties": [
               {
@@ -1428,10 +1205,26 @@
                 "value": "dateTimeAsIso"
               }
             ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #D"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
           }
         ]
       },
       "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
         {
           "id": "organize",
           "options": {
@@ -1441,7 +1234,7 @@
             },
             "renameByName": {
               "tool_name": "工具",
-              "model": "模型",
+              "trace_id": "trace_id",
               "error_class": "失败分类"
             }
           }

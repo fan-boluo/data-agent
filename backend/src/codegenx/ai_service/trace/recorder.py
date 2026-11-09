@@ -251,7 +251,7 @@ def session_start(session: Any) -> None:
     try:
         if not _cfg().enabled or session is None:
             return
-        trace_metrics.feed_session_start(app_id=str(getattr(session, "app_id", "") or "main"))
+        trace_metrics.feed_session_start()
     except Exception as exc:  # noqa: BLE001 — trace 故障只降级
         log.error("trace session_start 异常: {}", exc)
 
@@ -261,9 +261,7 @@ async def session_end(session: Any) -> None:
     try:
         if not _cfg().enabled or session is None:
             return
-        trace_metrics.feed_session_end(
-            app_id=str(getattr(session, "app_id", "") or "main"),
-        )
+        trace_metrics.feed_session_end()
         trace_metrics.get_streak_tracker().cleanup_session(session.session_id)
         # 兜底：未正常 turn_end 的轮次全量落库
         for buffer in (_buffers.pop(session.session_id, None) or {}).values():

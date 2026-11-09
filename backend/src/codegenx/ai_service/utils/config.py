@@ -68,7 +68,7 @@ class AgentConfig(Base):
     # 传输层重试参数已上移至 llm.*（LLMConfig，P1 韧性层），此处不再保留
     llm_stream_timeout_seconds: ClassVar[float] = 300.0  # 单次 LLM 流式调用总超时（秒）
     max_steps: int = Field(
-        default=50,
+        default=20,
         validation_alias=AliasChoices("maxSteps", "max_steps"),
     )  # 一次turn的最大llm推理步数
 
@@ -300,7 +300,7 @@ class MemoryFlushConfig(Base):
     archive_days: int = Field(
         default=90,
         validation_alias=AliasChoices("archiveDays", "archive_days"),
-    )  # 归档天数（导出 + Qdrant 物理删除；软删后再满 archive_days-decay_days 天）
+    )  # 归档天数（导出 + valid_to 置位；软删后再满 archive_days-decay_days 天）
     hot_max_entries: int = Field(
         default=80,
         validation_alias=AliasChoices("hotMaxEntries", "hot_max_entries"),
@@ -547,7 +547,7 @@ class Config(BaseSettings):
         if identifier:
             normalized = str(identifier).strip().lower()
             for agent in self.agents:
-                if normalized in {str(agent.id).strip().lower(), str(agent.token).strip().lower(), str(agent.name).strip().lower()}:
+                if normalized in {str(agent.id).strip().lower(), str(agent.name).strip().lower()}:
                     return agent
         return self.get_default_agent()
 

@@ -82,6 +82,32 @@ export async function listMonitorAlerts(
   })
 }
 
+export async function getToolDailyStats(
+  params?: { days?: number },
+  options?: { [key: string]: any }
+) {
+  return request('/api/stats/admin/monitor/tools/daily', {
+    method: 'GET',
+    params: {
+      ...(params || {}),
+    },
+    ...(options || {}),
+  })
+}
+
+export async function getLlmDailyStats(
+  params?: { days?: number },
+  options?: { [key: string]: any }
+) {
+  return request('/api/stats/admin/monitor/llm/daily', {
+    method: 'GET',
+    params: {
+      ...(params || {}),
+    },
+    ...(options || {}),
+  })
+}
+
 export async function getMonitorConfig(options?: { [key: string]: any }) {
   return request('/api/stats/admin/monitor/config', {
     method: 'GET',

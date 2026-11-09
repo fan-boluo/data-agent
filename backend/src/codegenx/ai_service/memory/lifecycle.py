@@ -7,8 +7,8 @@ P0-11 关键修正：hot 层不做时间衰减——hot 是全量加载不走召
 流程（每日由 MemoryScheduler 定时触发，纯规则不耗 LLM）：
   consolidate    warm 精确重复合并（hot 压缩为 P2-2）
   decay_archive  warm 30 天未命中软删（status=4，可恢复）
-                 → 软删后再 60 天（累计 90）导出归档 + Qdrant 物理删除，
-                   MySQL 保留 status=4 行（valid_to 置位防重复导出）
+                 → 软删后再 60 天（累计 90）导出归档 + valid_to 置位（不再参与召回），
+                   PostgreSQL 保留 status=4 行（valid_to 置位防重复导出）
 
 归档介质：OSS 为后续项，P0 导出本地 zip（.data/{user}/{app}/memory/archive/，
 按月 jsonl 追加，与 v1 归档格式兼容）。
@@ -29,7 +29,6 @@ from codegenx.ai_service.memory.memory_store import (
     scan_archivable,
     mark_archived_exported,
 )
-from codegenx.ai_service.memory.vector_store import delete_points_by_ids
 
 
 def _decay_days() -> int:
@@ -101,12 +100,7 @@ async def decay_and_archive_all_apps() -> tuple[int, int]:
             await mark_archived_exported(exported_ids)  # valid_to 置位，防重复导出
         except Exception as exc:  # noqa: BLE001
             log.error("[decay_archive] 归档位标记失败（下轮将重复导出）: {}", exc)
-        # Qdrant 物理删除；失败无害（payload 已是 inactive 不参与召回），
-        # 由每日 sync_check 幽灵清理兜底
-        try:
-            await delete_points_by_ids(exported_ids)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("[decay_archive] Qdrant 归档删除失败（留待 sync_check）:{}", exc)
+        # 向量与记忆同表（pgvector）：valid_to 置位后行已不参与召回，无需外部清理
 
     return soft_deleted, len(exported_ids)
 

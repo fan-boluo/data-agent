@@ -1,16 +1,17 @@
 """
-记忆离线任务队列 + 消费水位 + 同步检查点 —— MySQL DAO（async SQLAlchemy）。
+记忆离线任务队列 + 消费水位 —— PostgreSQL DAO（asyncpg 原生）。
 
-对应表（DDL 见 init/memory_schema.sql，由部署方手动执行，本模块不建表）：
-  memory_task            离线任务队列（v2.1 增 idempotency_key 幂等 + produced_count 审计）
-  memory_watermark       会话消息消费水位（chat_message.seq，会话内单调递增）
-  memory_sync_checkpoint 双数据源对账断点（v2.1 语义：仅断点续跑，不作正确性保证）
+对应表（DDL 见 init/pg_memory_schema.sql，由部署方手动执行，本模块不建表）：
+  memory.memory_task      离线任务队列（idempotency_key 幂等 + produced_count 审计）
+  memory.memory_watermark  会话消息消费水位（chat_message.seq，会话内单调递增）
 
 状态机：pending → running → done
                 └→ 失败：retry_count+1，按退避(1m/5m/30m)回 pending；超限 → dead
 语义：at-least-once。任务失败重跑可能重复写记忆：
-  hot  由 uk_slot upsert 天然幂等（同槽位覆盖）
-  warm 由 memory_task 幂等键/at-least-once + 后续 conflict_detect（P1）兜底
+  hot  由 uk_memory_slot upsert 天然幂等（同槽位覆盖）
+  warm 由 memory_task 幂等键/at-least-once + 后续 conflict_detect 兜底
+
+说明：向量与记忆行同表同事务写入（pgvector），双数据源对账子系统整体下线。
 """
 from __future__ import annotations
 
@@ -19,18 +20,21 @@ import time
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import text
-
-from db.mysql.session import session_maker
+from db.postgres.postgres_client import (
+    memory_execute,
+    memory_fetch,
+    memory_fetchrow,
+    memory_fetchval,
+    memory_transaction,
+)
 from shared import log as logger
 
-# 任务类型常量（与 memory_schema.sql 的注释一致）
+# 任务类型常量（与 pg_memory_schema.sql 的注释一致）
 TASK_WARM_EXTRACT = "warm_extract"
 TASK_CONSOLIDATE = "consolidate"
 TASK_DECAY_ARCHIVE = "decay_archive"
-TASK_SYNC_CHECK = "sync_check"
 TASK_COMPLIANCE_DELETE = "compliance_delete"
-TASK_CONFLICT_DETECT = "conflict_detect"  # P1-9：每日异步矛盾检测
+TASK_CONFLICT_DETECT = "conflict_detect"  # 每日异步矛盾检测
 
 # 失败退避序列（秒）：第 n 次失败后等待 backoffs[n-1] 再重试
 RETRY_BACKOFFS = (60.0, 300.0, 1800.0)
@@ -38,7 +42,7 @@ MAX_RETRY = len(RETRY_BACKOFFS)
 
 
 class MemoryTaskStore:
-    """memory_task / memory_watermark / memory_sync_checkpoint 三表 DAO。"""
+    """memory_task / memory_watermark 两表 DAO（PostgreSQL）。"""
 
     # === 任务登记 ===
 
@@ -57,41 +61,34 @@ class MemoryTaskStore:
 
         - dedup=True：同类型同会话已有 pending/running 任务则跳过
           （聊天在途高频触发靠它防任务爆炸）
-        - idempotency_key：uk_idempotency 唯一约束兜底（合规删除等
+        - idempotency_key：uk_memory_task_idempotency 唯一约束兜底（合规删除等
           强幂等场景）；键冲突返回 None
         """
-        async with session_maker() as session:
-            if dedup:
-                row = (
-                    await session.execute(
-                        text(
-                            "SELECT id FROM memory_task "
-                            "WHERE task_type = :t AND session_id = :s AND status IN ('pending','running') "
-                            "LIMIT 1"
-                        ),
-                        {"t": task_type, "s": session_id},
-                    )
-                ).first()
-                if row is not None:
-                    return None
-            cur = await session.execute(
-                text(
-                    "INSERT INTO memory_task "
-                    "(task_type, idempotency_key, app_id, user_id, session_id, status, payload, next_run_at) "
-                    "VALUES (:t, :ik, :a, :u, :s, 'pending', :p, :n)"
-                ),
-                {
-                    "t": task_type,
-                    "ik": idempotency_key,
-                    "a": str(app_id),
-                    "u": str(user_id or ""),
-                    "s": session_id,
-                    "p": json.dumps(payload, ensure_ascii=False) if payload else None,
-                    "n": int(next_run_at),
-                },
+        if dedup:
+            hit = await memory_fetchval(
+                "SELECT id FROM memory.memory_task "
+                "WHERE task_type = $1 AND session_id = $2 AND status IN ('pending','running') "
+                "LIMIT 1",
+                task_type, session_id,
             )
-            await session.commit()
-            return int(cur.lastrowid or 0) or None
+            if hit is not None:
+                return None
+        # 幂等键冲突时不插入，RETURNING 无行 → 返回 None
+        new_id = await memory_fetchval(
+            "INSERT INTO memory.memory_task "
+            "(task_type, idempotency_key, app_id, user_id, session_id, status, payload, next_run_at) "
+            "VALUES ($1, $2, $3, $4, $5, 'pending', $6::jsonb, $7) "
+            "ON CONFLICT (idempotency_key) DO NOTHING "
+            "RETURNING id",
+            task_type,
+            idempotency_key,
+            str(app_id),
+            str(user_id or ""),
+            session_id,
+            json.dumps(payload, ensure_ascii=False) if payload else None,
+            int(next_run_at),
+        )
+        return int(new_id) if new_id is not None else None
 
     # === 任务领取与状态流转 ===
 
@@ -102,34 +99,22 @@ class MemoryTaskStore:
         多消费者也不会把同一任务发两次（当前为单消费者，双保险）。
         """
         now = now or time.time()
-        async with session_maker() as session:
-            rows = (
-                (
-                    await session.execute(
-                        text(
-                            "SELECT * FROM memory_task "
-                            "WHERE status = 'pending' AND next_run_at <= :n "
-                            "ORDER BY id LIMIT :l FOR UPDATE SKIP LOCKED"
-                        ),
-                        {"n": int(now), "l": int(limit)},
-                    )
-                )
-                .mappings()
-                .all()
+        async with memory_transaction() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM memory.memory_task "
+                "WHERE status = 'pending' AND next_run_at <= $1 "
+                "ORDER BY id LIMIT $2 FOR UPDATE SKIP LOCKED",
+                int(now), int(limit),
             )
             tasks = [dict(r) for r in rows]
             if tasks:
-                ids = [t["id"] for t in tasks]
-                await session.execute(
-                    text(
-                        "UPDATE memory_task SET status = 'running' "
-                        "WHERE id IN :ids"
-                    ),
-                    {"ids": tuple(ids)},
+                ids = [int(t["id"]) for t in tasks]
+                await conn.execute(
+                    "UPDATE memory.memory_task SET status = 'running' WHERE id = ANY($1::bigint[])",
+                    ids,
                 )
                 for t in tasks:
                     t["status"] = "running"
-            await session.commit()
         for t in tasks:
             t["payload"] = self._parse_payload(t.get("payload"))
         return tasks
@@ -137,105 +122,82 @@ class MemoryTaskStore:
     async def mark_done(
         self, task_id: int, produced_count: int = 0, result_payload: dict | None = None
     ) -> None:
-        """完成（produced_count 审计 + payload JSON_MERGE_PATCH 回填执行结果，§4.2 ⑥）。"""
-        async with session_maker() as session:
-            if result_payload:
-                await session.execute(
-                    text(
-                        "UPDATE memory_task SET status = 'done', produced_count = :pc, "
-                        "last_error = NULL, "
-                        "payload = JSON_MERGE_PATCH(COALESCE(payload, '{}'), :rp) "
-                        "WHERE id = :i"
-                    ),
-                    {
-                        "i": task_id, "pc": int(produced_count),
-                        "rp": json.dumps(result_payload, ensure_ascii=False, default=str),
-                    },
-                )
-            else:
-                await session.execute(
-                    text(
-                        "UPDATE memory_task SET status = 'done', produced_count = :pc, last_error = NULL "
-                        "WHERE id = :i"
-                    ),
-                    {"i": task_id, "pc": int(produced_count)},
-                )
-            await session.commit()
+        """完成（produced_count 审计 + payload 执行结果回填）。"""
+        if result_payload:
+            await memory_execute(
+                "UPDATE memory.memory_task SET status = 'done', produced_count = $2, "
+                "last_error = NULL, "
+                "payload = COALESCE(payload, '{}'::jsonb) || $3::jsonb "
+                "WHERE id = $1",
+                int(task_id), int(produced_count),
+                json.dumps(result_payload, ensure_ascii=False, default=str),
+            )
+        else:
+            await memory_execute(
+                "UPDATE memory.memory_task SET status = 'done', produced_count = $2, "
+                "last_error = NULL WHERE id = $1",
+                int(task_id), int(produced_count),
+            )
 
     async def reschedule(self, task_id: int, delay_sec: float = 60.0) -> None:
         """无过错重排（如会话锁被占）：保持 pending，延后领取，不计失败次数。"""
-        async with session_maker() as session:
-            await session.execute(
-                text(
-                    "UPDATE memory_task SET status = 'pending', next_run_at = :n WHERE id = :i"
-                ),
-                {"i": task_id, "n": int(time.time() + delay_sec)},
-            )
-            await session.commit()
+        await memory_execute(
+            "UPDATE memory.memory_task SET status = 'pending', next_run_at = $2 WHERE id = $1",
+            int(task_id), int(time.time() + delay_sec),
+        )
 
     async def touch_running(self, task_id: int) -> None:
-        """长任务心跳（§7.4）：仅刷新 updated_at，防止被卡死回收巡检误杀。"""
-        async with session_maker() as session:
-            await session.execute(
-                text(
-                    "UPDATE memory_task SET updated_at = NOW() "
-                    "WHERE id = :i AND status = 'running'"
-                ),
-                {"i": task_id},
-            )
-            await session.commit()
+        """长任务心跳：仅刷新 updated_at，防止被卡死回收巡检误杀。
+
+        updated_at 由触发器 trg_memory_task_touch 在 UPDATE 时刷新，
+        这里显式赋值是为了语义清晰（本语句只做心跳，不改业务字段）。
+        """
+        await memory_execute(
+            "UPDATE memory.memory_task SET updated_at = now() "
+            "WHERE id = $1 AND status = 'running'",
+            int(task_id),
+        )
 
     async def reclaim_stuck(self, timeout_sec: int = 600) -> int:
-        """卡死回收（§7.4）：running 且 updated_at 超时的任务复位 pending。
+        """卡死回收：running 且 updated_at 超时的任务复位 pending。
 
         Worker 崩溃会让任务永久停在 running；巡检每分钟跑一次。
-        返回复位行数（P1-12 指标 memory.task.stuck_reclaimed）。
+        返回复位行数（指标 memory.task.stuck_reclaimed）。
         """
-        async with session_maker() as session:
-            cur = await session.execute(
-                text(
-                    "UPDATE memory_task SET status = 'pending', next_run_at = :n "
-                    "WHERE status = 'running' "
-                    "AND updated_at < DATE_SUB(NOW(), INTERVAL :t SECOND)"
-                ),
-                {"n": int(time.time()), "t": int(timeout_sec)},
-            )
-            await session.commit()
-            return int(cur.rowcount or 0)
+        rows = await memory_fetch(
+            "UPDATE memory.memory_task SET status = 'pending', next_run_at = $1 "
+            "WHERE status = 'running' "
+            "AND updated_at < now() - make_interval(secs => $2::int) "
+            "RETURNING id",
+            int(time.time()), int(timeout_sec),
+        )
+        return len(rows)
 
     async def mark_failed(self, task_id: int, error: str, backoffs: tuple = RETRY_BACKOFFS) -> str:
         """失败退避：回 pending 延迟重试；超限置 dead。返回处理后的状态。"""
         now = time.time()
-        async with session_maker() as session:
-            row = (
-                await session.execute(
-                    text("SELECT retry_count FROM memory_task WHERE id = :i"),
-                    {"i": task_id},
-                )
-            ).first()
-            retry = ((row[0] if row else 0) or 0) + 1
-            if retry > len(backoffs):
-                status, next_at = "dead", now
-            else:
-                status, next_at = "pending", now + backoffs[retry - 1]
-            await session.execute(
-                text(
-                    "UPDATE memory_task SET status = :st, retry_count = :r, next_run_at = :n, "
-                    "last_error = :e WHERE id = :i"
-                ),
-                {"st": status, "r": retry, "n": int(next_at), "e": error[:2000], "i": task_id},
-            )
-            await session.commit()
+        prev = await memory_fetchval(
+            "SELECT retry_count FROM memory.memory_task WHERE id = $1", int(task_id)
+        )
+        retry = (int(prev or 0)) + 1
+        if retry > len(backoffs):
+            status, next_at = "dead", now
+        else:
+            status, next_at = "pending", now + backoffs[retry - 1]
+        await memory_execute(
+            "UPDATE memory.memory_task SET status = $1, retry_count = $2, "
+            "next_run_at = $3, last_error = $4 WHERE id = $5",
+            status, retry, int(next_at), error[:2000], int(task_id),
+        )
         return status
 
     async def recover_running(self) -> int:
         """启动/关闭时把 running 任务复位 pending（崩溃恢复，at-least-once）。"""
-        async with session_maker() as session:
-            cur = await session.execute(
-                text("UPDATE memory_task SET status = 'pending' WHERE status = 'running'")
-            )
-            await session.commit()
-            changed = int(cur.rowcount or 0)
+        rows = await memory_fetch(
+            "UPDATE memory.memory_task SET status = 'pending' "
+            "WHERE status = 'running' RETURNING id"
+        )
+        changed = len(rows)
         if changed:
             logger.info("记忆任务崩溃恢复: {} 个 running 任务已复位为 pending", changed)
         return changed
@@ -243,31 +205,16 @@ class MemoryTaskStore:
     # === 统计与调度辅助 ===
 
     async def stats(self) -> dict[str, int]:
-        async with session_maker() as session:
-            rows = (
-                (
-                    await session.execute(
-                        text("SELECT status, COUNT(*) AS c FROM memory_task GROUP BY status")
-                    )
-                )
-                .mappings()
-                .all()
-            )
-        return {r["status"]: int(r["c"]) for r in rows}
+        rows = await memory_fetch(
+            "SELECT status, COUNT(*) AS c FROM memory.memory_task GROUP BY status"
+        )
+        return {str(r["status"]): int(r["c"]) for r in rows}
 
     async def get_by_id(self, task_id: int) -> dict | None:
-        """按 id 取任务完整行（P2-7 ③ 提炼批次排查）。payload 解析为 dict。"""
-        async with session_maker() as session:
-            row = (
-                (
-                    await session.execute(
-                        text("SELECT * FROM memory_task WHERE id = :i"),
-                        {"i": int(task_id)},
-                    )
-                )
-                .mappings()
-                .first()
-            )
+        """按 id 取任务完整行（提炼批次排查）。payload 解析为 dict。"""
+        row = await memory_fetchrow(
+            "SELECT * FROM memory.memory_task WHERE id = $1", int(task_id)
+        )
         if row is None:
             return None
         task = dict(row)
@@ -282,213 +229,99 @@ class MemoryTaskStore:
         """今天是否已登记过 decay_archive。"""
         return await self._scheduled_today("decay_archive")
 
-    async def sync_scheduled_today(self) -> bool:
-        """今天是否已登记过 sync_check。"""
-        return await self._scheduled_today("sync_check")
-
     async def conflict_scheduled_today(self) -> bool:
-        """今天是否已登记过 conflict_detect（P1-9）。"""
+        """今天是否已登记过 conflict_detect。"""
         return await self._scheduled_today("conflict_detect")
 
     async def _scheduled_today(self, task_type: str) -> bool:
         today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        async with session_maker() as session:
-            row = (
-                await session.execute(
-                    text(
-                        "SELECT id FROM memory_task WHERE task_type = :t "
-                        "AND status IN ('pending','running','done') AND created_at >= :d LIMIT 1"
-                    ),
-                    {"t": task_type, "d": today_start},
-                )
-            ).first()
-        return row is not None
+        hit = await memory_fetchval(
+            "SELECT id FROM memory.memory_task WHERE task_type = $1 "
+            "AND status IN ('pending','running','done') AND created_at >= $2 LIMIT 1",
+            task_type, today_start,
+        )
+        return hit is not None
 
-    # === 水位（memory_watermark 表）===
+    # === 水位（memory.memory_watermark 表）===
 
     async def get_watermark(self, session_id: str) -> int:
         """读取会话消费水位（已消费的最大 chat_message.seq）；无记录返回 0。"""
-        async with session_maker() as session:
-            row = (
-                await session.execute(
-                    text("SELECT last_seq FROM memory_watermark WHERE session_id = :s"),
-                    {"s": session_id},
-                )
-            ).first()
-        return int(row[0] or 0) if row else 0
+        val = await memory_fetchval(
+            "SELECT last_seq FROM memory.memory_watermark WHERE session_id = $1", session_id
+        )
+        return int(val or 0)
 
     async def get_watermark_full(self, session_id: str) -> dict | None:
         """读取完整水位状态（漏斗触发判断用）。"""
-        async with session_maker() as session:
-            row = (
-                (
-                    await session.execute(
-                        text(
-                            "SELECT last_seq, pending_signals, pending_tokens, last_extract_at "
-                            "FROM memory_watermark WHERE session_id = :s"
-                        ),
-                        {"s": session_id},
-                    )
-                )
-                .mappings()
-                .first()
-            )
+        row = await memory_fetchrow(
+            "SELECT last_seq, pending_signals, pending_tokens, last_extract_at "
+            "FROM memory.memory_watermark WHERE session_id = $1",
+            session_id,
+        )
         return dict(row) if row else None
 
     async def bump_pending(
         self, session_id: str, app_id: str, user_id: str,
         signals: int, tokens: int,
     ) -> dict | None:
-        """P1-2 第一级：累加轻量信号计数（upsert 原子自增），返回累加后状态。
+        """第一级：累加轻量信号计数（upsert 原子自增），返回累加后状态。
 
-        只动 pending_* 计数，不碰 last_seq（消费位点唯一写者是提炼 Worker，
-        见 memory/trigger.py 的偏差说明）。
+        只动 pending_* 计数，不碰 last_seq（消费位点唯一写者是提炼 Worker）。
         """
-        async with session_maker() as session:
-            await session.execute(
-                text(
-                    "INSERT INTO memory_watermark "
-                    "(session_id, app_id, user_id, last_seq, pending_signals, pending_tokens) "
-                    "VALUES (:s, :a, :u, 0, :sg, :tk) "
-                    "ON DUPLICATE KEY UPDATE "
-                    "pending_signals = pending_signals + VALUES(pending_signals), "
-                    "pending_tokens = pending_tokens + VALUES(pending_tokens)"
-                ),
-                {
-                    "s": session_id, "a": str(app_id), "u": str(user_id or ""),
-                    "sg": max(0, int(signals)), "tk": max(0, int(tokens)),
-                },
-            )
-            await session.commit()
+        await memory_execute(
+            "INSERT INTO memory.memory_watermark "
+            "(session_id, app_id, user_id, last_seq, pending_signals, pending_tokens) "
+            "VALUES ($1, $2, $3, 0, $4, $5) "
+            "ON CONFLICT (session_id) DO UPDATE SET "
+            "pending_signals = memory.memory_watermark.pending_signals + EXCLUDED.pending_signals, "
+            "pending_tokens = memory.memory_watermark.pending_tokens + EXCLUDED.pending_tokens",
+            session_id, str(app_id), str(user_id or ""),
+            max(0, int(signals)), max(0, int(tokens)),
+        )
         return await self.get_watermark_full(session_id)
 
     async def clear_pending(self, session_id: str) -> None:
-        """清零漏斗计数并刷新 updated_at（BUG-2 修复：no-op 提取也须清账）。
+        """清零漏斗计数（no-op 提取也须清账，否则 patrol 重复补投空转）。
 
-        兜底补投的设计原意是「投递前崩溃」一次性补投（§4.1）：补投过即应退场。
-        否则 pending_* 永不清零 → 每轮 patrol 重复补投空转。半截轮次场景安全：
-        后续轮次完成时漏斗（signal/timeout 触发）会重新累加并投递。
-        updated_at 由 DDL ON UPDATE CURRENT_TIMESTAMP 自动刷新，脱离 stale 扫描集。
+        兜底补投是「投递前崩溃」一次性补投：补投过即应退场。半截轮次场景安全：
+        后续轮次完成时漏斗会重新累加并投递。
+        updated_at 由触发器自动刷新，本表随之脱离 stale 扫描集。
         """
-        async with session_maker() as session:
-            await session.execute(
-                text(
-                    "UPDATE memory_watermark "
-                    "SET pending_signals = 0, pending_tokens = 0 "
-                    "WHERE session_id = :s"
-                ),
-                {"s": session_id},
-            )
-            await session.commit()
+        await memory_execute(
+            "UPDATE memory.memory_watermark "
+            "SET pending_signals = 0, pending_tokens = 0 "
+            "WHERE session_id = $1",
+            session_id,
+        )
 
     async def scan_stale_pending(self, minutes: int, limit: int = 50) -> list[dict]:
-        """P1-2 兜底扫描：有积压信号且超时未处理的会话（投递前崩溃补投，§4.1）。"""
-        async with session_maker() as session:
-            rows = (
-                (
-                    await session.execute(
-                        text(
-                            "SELECT session_id, app_id, user_id, pending_signals, pending_tokens "
-                            "FROM memory_watermark "
-                            "WHERE (pending_signals > 0 OR pending_tokens > 0) "
-                            "AND updated_at < DATE_SUB(NOW(), INTERVAL :m MINUTE) "
-                            "ORDER BY updated_at LIMIT :l"
-                        ),
-                        {"m": int(minutes), "l": int(limit)},
-                    )
-                )
-                .mappings()
-                .all()
-            )
+        """兜底扫描：有积压信号且超时未处理的会话（投递前崩溃补投）。"""
+        rows = await memory_fetch(
+            "SELECT session_id, app_id, user_id, pending_signals, pending_tokens "
+            "FROM memory.memory_watermark "
+            "WHERE (pending_signals > 0 OR pending_tokens > 0) "
+            "AND updated_at < now() - make_interval(secs => $1::int) "
+            "ORDER BY updated_at LIMIT $2",
+            int(minutes) * 60, int(limit),
+        )
         return [dict(r) for r in rows]
 
     async def advance_watermark(
         self, session_id: str, app_id: str, user_id: str, last_seq: int
     ) -> None:
-        """推进水位并清零漏斗计数（§4.2 ⑥，仅在提取成功后调用）。
+        """推进水位并清零漏斗计数（仅在提取成功后调用）。
 
-        pending_signals/pending_tokens 归零 + last_extract_at=NOW()；
+        pending_signals/pending_tokens 归零 + last_extract_at=now()；
         崩溃在推进前则计数保留，重试覆盖同一区间（幂等）。
         """
-        async with session_maker() as session:
-            await session.execute(
-                text(
-                    "INSERT INTO memory_watermark "
-                    "(session_id, app_id, user_id, last_seq) "
-                    "VALUES (:s, :a, :u, :l) "
-                    "ON DUPLICATE KEY UPDATE last_seq = :l, "
-                    "pending_signals = 0, pending_tokens = 0, last_extract_at = NOW()"
-                ),
-                {
-                    "s": session_id,
-                    "a": str(app_id),
-                    "u": str(user_id or ""),
-                    "l": int(last_seq),
-                },
-            )
-            await session.commit()
-
-    # === 同步检查点（memory_sync_checkpoint 表）===
-
-    async def get_checkpoint(self, app_id: str, scope: str = "warm", user_id: str = "") -> str:
-        """读取已同步到 Qdrant 的最大记忆 id；无记录返回空串。"""
-        async with session_maker() as session:
-            row = (
-                await session.execute(
-                    text(
-                        "SELECT last_entry_id FROM memory_sync_checkpoint "
-                        "WHERE app_id = :a AND scope = :sc AND user_id = :u"
-                    ),
-                    {"a": str(app_id), "sc": scope, "u": str(user_id or "")},
-                )
-            ).first()
-        return str(row[0] or "") if row else ""
-
-    async def advance_checkpoint(self, app_id: str, scope: str, last_entry_id: str, user_id: str = "") -> None:
-        """推进同步检查点（upsert）。"""
-        async with session_maker() as session:
-            await session.execute(
-                text(
-                    "INSERT INTO memory_sync_checkpoint (user_id, app_id, scope, last_entry_id) "
-                    "VALUES (:u, :a, :sc, :e) "
-                    "ON DUPLICATE KEY UPDATE last_entry_id = :e"
-                ),
-                {"u": str(user_id or ""), "a": str(app_id), "sc": scope, "e": last_entry_id},
-            )
-            await session.commit()
-
-    async def record_reconcile(
-        self,
-        app_id: str,
-        user_id: str,
-        scope: str,
-        last_entry_id: str = "",
-        scanned_rows: int = 0,
-        missing_found: int = 0,
-        ghost_found: int = 0,
-    ) -> None:
-        """P1-5 对账进度回写（§7.3 ④）：last_reconcile_at=NOW() + 统计列。
-
-        checkpoint 只做断点续跑与审计，不承担同步正确性（正确性由
-        vector_synced_at 行级队列保证）。
-        """
-        async with session_maker() as session:
-            await session.execute(
-                text(
-                    "INSERT INTO memory_sync_checkpoint "
-                    "(user_id, app_id, scope, last_entry_id, last_reconcile_at, "
-                    " scanned_rows, missing_found, ghost_found) "
-                    "VALUES (:u, :a, :sc, :e, NOW(), :sr, :mf, :gf) "
-                    "ON DUPLICATE KEY UPDATE last_entry_id = :e, last_reconcile_at = NOW(), "
-                    "scanned_rows = :sr, missing_found = :mf, ghost_found = :gf"
-                ),
-                {
-                    "u": str(user_id or ""), "a": str(app_id), "sc": scope,
-                    "e": last_entry_id, "sr": int(scanned_rows),
-                    "mf": int(missing_found), "gf": int(ghost_found),
-                },
-            )
-            await session.commit()
+        await memory_execute(
+            "INSERT INTO memory.memory_watermark "
+            "(session_id, app_id, user_id, last_seq) "
+            "VALUES ($1, $2, $3, $4) "
+            "ON CONFLICT (session_id) DO UPDATE SET last_seq = EXCLUDED.last_seq, "
+            "pending_signals = 0, pending_tokens = 0, last_extract_at = now()",
+            session_id, str(app_id), str(user_id or ""), int(last_seq),
+        )
 
     # === 内部 ===
 

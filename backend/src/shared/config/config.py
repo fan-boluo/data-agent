@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     postgres_pool_min: int = 1
     postgres_pool_max: int = 5
 
+    # 记忆域连接池（memory.* + message.chat_message）：聊天写入与提炼 Worker 高频使用，
+    # 与语义层分池，避免长事务拖慢语义检索
+    postgres_memory_pool_min: int = 2
+    postgres_memory_pool_max: int = 10
+
     # 系统数据
     mysql_host: str = "127.0.0.1"
     mysql_port: int = 3306
@@ -73,11 +78,8 @@ class Settings(BaseSettings):
     redis_db: int = 1
     redis_password: str = ""
 
-    qdrant_url: str = "127.0.0.1"  # 默认用 IPv4；Windows 上 localhost 优先解析到 ::1 IPv6，而 Qdrant 只监听 IPv4 会导致 10061
-    qdrant_port: int = 6333
-    qdrant_api_key: str = ""
-    # 注意：向量维度不在此配置 —— 以 backend/config.json 的 embedding.dimensions 为唯一来源，
-    # 由 memory/vector_store.py 建库时读取，避免双配置不一致。
+    # 注意：向量维度不在此处重复配置 —— 以 backend/config.json 的 embedding.dimensions
+    # 为唯一来源，建表脚本 init/pg_memory_schema.sql 的 vector(N) 需与之保持一致。
 
     cors_allow_origin_patterns: str = "*"
     log_level: str = "INFO"

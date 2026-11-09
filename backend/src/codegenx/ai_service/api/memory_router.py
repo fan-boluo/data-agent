@@ -6,9 +6,9 @@
   ② GET  /{memory_id}/trace       溯源：source_msg_ids → chat_message 原始消息
   ③ GET  /task/{task_id}          提炼批次：任务行 + 消费区间消息 + 产出记忆
   ④ POST /retrieval-sim           模拟检索：双路原始分 + 逐因子重排明细（不登记命中）
-  ⑤ POST /rebuild-vectors         单用户向量重建：清 Qdrant 点 + vector_synced_at 全置 NULL
-管理后台（附录 A：MySQL 是真源，一切修改走接口——手改 MySQL 不会失效
-Redis hot 缓存、也不会触发 warm 向量重同步，这正是本路由存在的理由）：
+  ⑤ POST /rebuild-vectors         单用户向量重建：对 active warm 行原地重新 embed
+管理后台（附录 A：PostgreSQL 是真源，一切修改走接口——手改库不会失效
+Redis hot 缓存、也不会重建 warm 向量，这正是本路由存在的理由）：
   ⑥ POST /deactivate              停用（status=3 撤销，走 mark_inactive 硬约束）
   ⑦ POST /update                  编辑（新条取代旧条：source_type=3 人工录入、confidence=1.0）
 
@@ -25,11 +25,12 @@ from pydantic import BaseModel
 from codegenx.ai_service.chat_message import get_chat_message_store
 from codegenx.ai_service.memory import metrics
 from codegenx.ai_service.memory.memory_store import (
-    append_warm,
+    append_warm_embedded,
     get_by_memory_ids,
     list_memories,
     mark_inactive,
-    reset_vector_sync,
+    rebuild_warm_embeddings,
+    count_warm_with_vector,
     upsert_hot_slot,
 )
 from codegenx.ai_service.memory.models import (
@@ -46,10 +47,6 @@ from codegenx.ai_service.memory.models import (
 from codegenx.ai_service.memory.retriever import debug_recall
 from codegenx.ai_service.memory.writer import match_sensitive
 from codegenx.ai_service.utils.config import config
-from codegenx.ai_service.memory.vector_store import (
-    count_points,
-    delete_points_by_filter,
-)
 from codegenx.ai_service.schedule.memory_task_store import (
     TASK_WARM_EXTRACT,
     get_memory_task_store,
@@ -203,8 +200,8 @@ class RetrievalSimRequest(BaseModel):
 async def admin_retrieval_sim(req: RetrievalSimRequest):
     """回答「为什么召回了这条 / 为什么没召回那条」：双路原始分 + 重排因子明细。
 
-    模拟不落命中（hit 统计不受污染）；ghost_point_ids 列出 Qdrant 有而
-    MySQL 无的点位（幽灵证据）。
+    模拟不落命中（hit 统计不受污染）；candidates 逐条标注来源通道
+    （vector / keyword / both）与各分项得分，便于定位「该召回却没召回」。
     """
     _require_tenant(req.app_id, req.user_id)
     if not str(req.query or "").strip():
@@ -225,21 +222,21 @@ async def admin_rebuild_vectors(
 ):
     """索引损坏 / embedding 换模型后的单用户重建（§10.3 ⑤）。
 
-    先清该租户 Qdrant 全部点位，再把 active warm 行 vector_synced_at 全部
-    置 NULL —— 同步 Worker（30s 周期）自动从 MySQL 全量重灌。
+    pgvector 与记忆同表：直接对该租户全部 active warm 行重新 embed 并原地更新，
+    无需「清点位 + 置 NULL + 异步 Worker 重灌」三步。
     """
     _require_tenant(req.app_id, req.user_id)
-    queued = await reset_vector_sync(req.app_id, req.user_id)
-    await delete_points_by_filter(req.app_id, req.user_id)  # 失败由幽灵清理兜底
-    remaining = await count_points(req.app_id, req.user_id, active_only=False)
+    total, rebuilt = await rebuild_warm_embeddings(req.app_id, req.user_id)
+    remaining = await count_warm_with_vector(req.app_id, req.user_id)
     metrics.log_event(
         "admin_rebuild_vectors", admin_id=str(admin_user.user_id),
-        app_id=req.app_id, user_id=req.user_id, queued_rows=queued, remaining_points=remaining,
+        app_id=req.app_id, user_id=req.user_id, total_rows=total, rebuilt_rows=rebuilt,
     )
     return success({
-        "queued_rows": queued,
+        "total_rows": total,
+        "rebuilt_rows": rebuilt,
         "remaining_points": remaining,
-        "note": "同步 Worker 将在 30s 周期内自动重灌，完成后可用 /retrieval-sim 复验",
+        "note": "已在原表原地重建向量，可用 /retrieval-sim 立即复验",
     })
 
 
@@ -351,7 +348,7 @@ async def admin_update_memory(
                 f"hot 层已满（上限 {hot_max}），请等待 consolidate 压缩或调大 hotMaxEntries",
             )
     else:
-        new_id = await append_warm(req.app_id, req.user_id, new_entry)
+        new_id = await append_warm_embedded(req.app_id, req.user_id, new_entry)
         new_entry.id = new_id
 
     # 旧条失效指向新条（放新条写成功之后，失败窗口内最多少一条新条，不会丢记忆）

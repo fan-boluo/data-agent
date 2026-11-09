@@ -15,7 +15,7 @@
 
 ## 前置条件
 
-- 依赖服务（MySQL / PostgreSQL / Redis / Qdrant）已启动；
+- 依赖服务（MySQL / PostgreSQL / Redis）已启动；
 - `backend/config.json` 默认智能体的 `model_name` 是**多模型逗号链**（每个模型一个独立熔断器），
   当前为 3 个：`qwen3.8-max-0902 → glm-5.3 → deepseek-v4.1-flash`；
 - Key 有效（预热与恢复阶段是真实调用，会产生少量 token）；

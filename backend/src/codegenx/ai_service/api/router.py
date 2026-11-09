@@ -426,6 +426,32 @@ async def internal_list_monitor_alerts(
         raise BusinessException(ErrorCode.SYSTEM_ERROR, str(exc)) from exc
 
 
+@monitor_router.get("/monitor/tools/daily")
+async def internal_get_tool_daily_stats(days: int = Query(default=7, ge=1, le=30)):
+    """近 N 天工具执行统计（tool_semantics 按工具 × 自然日聚合，上表下图数据源）。"""
+    try:
+        result = await get_monitor_query_service().get_tool_daily_stats(days)
+        return success(result)
+    except BusinessException:
+        raise
+    except Exception as exc:
+        log.exception("monitor tool daily stats failed")
+        raise BusinessException(ErrorCode.SYSTEM_ERROR, str(exc)) from exc
+
+
+@monitor_router.get("/monitor/llm/daily")
+async def internal_get_llm_daily_stats(days: int = Query(default=7, ge=1, le=30)):
+    """近 N 天 LLM 调用统计（trace_spans 按模型 × 自然日聚合，上表下图数据源）。"""
+    try:
+        result = await get_monitor_query_service().get_llm_daily_stats(days)
+        return success(result)
+    except BusinessException:
+        raise
+    except Exception as exc:
+        log.exception("monitor llm daily stats failed")
+        raise BusinessException(ErrorCode.SYSTEM_ERROR, str(exc)) from exc
+
+
 @monitor_router.post("/monitor/cleanup")
 async def internal_cleanup_monitor_history(
     retention_days: int = Query(default=7, alias="retentionDays"),

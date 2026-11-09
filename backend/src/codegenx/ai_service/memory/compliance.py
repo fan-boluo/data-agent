@@ -9,9 +9,9 @@
   source_msg_id  某条来源消息的派生记忆（source_msg_ids JSON 反查——
                  没有该字段本流程无法从「某条消息」找到派生记忆）
 
-级联顺序：MySQL（真源：硬删=监管要求 / 软删+脱敏=业务留痕，§6.4 ②）
-  → Qdrant（按 filter 物理删除，一个请求，§6.4 ③）
-  → 校验兜底（每日 sync_check 反向幽灵清理 + count_active 复核）
+级联顺序：PostgreSQL（真源：硬删=监管要求 / 软删+脱敏=业务留痕，§6.4 ②）
+  → 向量随行处理（pgvector 同表，删行/失效即对召回生效，§6.4 ③）
+  → 校验兜底（count_active 复核；单库单表无「外部索引幽灵」一类残留）
 Redis hot 缓存（P1-1）与对象存储归档接入后，须在此补 DEL / 归档清理步骤。
 
 审计：结构化日志（§10.2 硬要求——日志不含记忆正文，脱敏靠 memory_id 回查）。
@@ -29,7 +29,6 @@ from codegenx.ai_service.memory.memory_store import (
     compliance_soft_delete_redact,
     count_active,
 )
-from codegenx.ai_service.memory.vector_store import delete_points_by_filter
 
 VALID_SCOPES = ("all", "memory_id", "subject", "source_msg_id")
 
@@ -67,11 +66,7 @@ async def run_compliance_delete(
     else:
         deleted = await compliance_soft_delete_redact(app_id, user_id, ids)
 
-    # Qdrant 按 filter 物理删除（内部已容错：失败由 sync_check 幽灵清理兜底）
-    await delete_points_by_filter(
-        app_id, user_id,
-        memory_ids=None if scope == "all" else memory_ids,
-    )
+    # 向量与记忆同表（pgvector）：行已删除/失效即对召回生效，无需外部索引清理
 
     # 校验（§6.4 ⑦）：scope=all 时 active 应为 0；异步兜底由每日对账承担
     if scope == "all":

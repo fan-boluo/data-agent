@@ -16,11 +16,15 @@ from shared.schema.common import PageData
 from codegenx.ai_service.trace.schema.admin import (
     MonitorAlertQueryRequest,
     MonitorAlertRecordVO,
+    MonitorLlmDailyStat,
+    MonitorLlmDailyStats,
     MonitorOverviewStats,
     MonitorSessionDetail,
     MonitorSessionQueryRequest,
     MonitorSessionSummary,
     MonitorToolCallDetail,
+    MonitorToolDailyStat,
+    MonitorToolDailyStats,
     MonitorTurnSummary,
     TokenUsageItem,
     TokenUsageQueryRequest,
@@ -370,6 +374,109 @@ class MonitorQueryService:
     async def get_monitor_config(self) -> dict[str, Any]:
         """监控配置展示（agent 配置透视，只读）。"""
         return config.monitor.model_dump(mode="json", by_alias=True)
+
+    # ---------------------------------------------------------------- 执行统计（工具 / LLM）
+
+    async def get_tool_daily_stats(self, days: int = 7) -> MonitorToolDailyStats:
+        """近 N 天工具执行统计：tool_semantics 按「工具 × 自然日」聚合。
+
+        自然日按 Asia/Shanghai 切分，与用户看板口径一致；失败 = success 为 false。
+        """
+        days = max(1, min(int(days or 7), 30))
+        conn = await self._acquire()
+        try:
+            dates = await self._fetch_day_axis(conn, days)
+            rows = await conn.fetch(
+                """
+                SELECT tool_name,
+                       to_char(date_trunc('day', created_at AT TIME ZONE 'Asia/Shanghai'),
+                               'YYYY-MM-DD') AS day,
+                       COUNT(*)::int                                AS total,
+                       COUNT(*) FILTER (WHERE success)::int         AS success_count,
+                       COUNT(*) FILTER (WHERE NOT success)::int     AS failure_count
+                FROM telemetry.tool_semantics
+                WHERE created_at >= (date_trunc('day', now() AT TIME ZONE 'Asia/Shanghai')
+                                     - make_interval(days => $1::int - 1)) AT TIME ZONE 'Asia/Shanghai'
+                GROUP BY 1, 2
+                ORDER BY 2 DESC, 3 DESC, 1
+                """,
+                days,
+            )
+        finally:
+            await self._release(conn)
+        return MonitorToolDailyStats(
+            days=days,
+            dates=dates,
+            records=[
+                MonitorToolDailyStat(
+                    tool_name=r["tool_name"] or "unknown",
+                    date=r["day"],
+                    total=int(r["total"] or 0),
+                    success=int(r["success_count"] or 0),
+                    failure=int(r["failure_count"] or 0),
+                )
+                for r in rows
+            ],
+        )
+
+    async def get_llm_daily_stats(self, days: int = 7) -> MonitorLlmDailyStats:
+        """近 N 天 LLM 调用统计：trace_spans 中 op_type='llm' 按「模型 × 自然日」聚合。
+
+        模型名取 span attributes.model；成功 = status 为 ok，其余（error）计失败。
+        """
+        days = max(1, min(int(days or 7), 30))
+        conn = await self._acquire()
+        try:
+            dates = await self._fetch_day_axis(conn, days)
+            rows = await conn.fetch(
+                """
+                SELECT COALESCE(NULLIF(attributes->>'model', ''), 'unknown') AS model_name,
+                       to_char(date_trunc('day', started_at AT TIME ZONE 'Asia/Shanghai'),
+                               'YYYY-MM-DD') AS day,
+                       COUNT(*)::int                                AS total,
+                       COUNT(*) FILTER (WHERE status = 'ok')::int   AS success_count,
+                       COUNT(*) FILTER (WHERE status <> 'ok')::int  AS failure_count
+                FROM telemetry.trace_spans
+                WHERE op_type = 'llm'
+                  AND started_at >= (date_trunc('day', now() AT TIME ZONE 'Asia/Shanghai')
+                                     - make_interval(days => $1::int - 1)) AT TIME ZONE 'Asia/Shanghai'
+                GROUP BY 1, 2
+                ORDER BY 2 DESC, 3 DESC, 1
+                """,
+                days,
+            )
+        finally:
+            await self._release(conn)
+        return MonitorLlmDailyStats(
+            days=days,
+            dates=dates,
+            records=[
+                MonitorLlmDailyStat(
+                    model_name=r["model_name"] or "unknown",
+                    date=r["day"],
+                    total=int(r["total"] or 0),
+                    success=int(r["success_count"] or 0),
+                    failure=int(r["failure_count"] or 0),
+                )
+                for r in rows
+            ],
+        )
+
+    @staticmethod
+    async def _fetch_day_axis(conn: asyncpg.Connection, days: int) -> list[str]:
+        """近 N 天完整日期轴（含无调用的日期，前端折线图按此对齐）。"""
+        rows = await conn.fetch(
+            """
+            SELECT to_char(d::date, 'YYYY-MM-DD') AS day
+            FROM generate_series(
+                (now() AT TIME ZONE 'Asia/Shanghai')::date - ($1::int - 1),
+                (now() AT TIME ZONE 'Asia/Shanghai')::date,
+                interval '1 day'
+            ) AS d
+            """,
+            days,
+        )
+        return [r["day"] for r in rows]
 
     # ---------------------------------------------------------------- 内部
 

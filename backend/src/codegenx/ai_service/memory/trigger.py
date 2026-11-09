@@ -27,7 +27,6 @@ import time
 
 from shared import log
 from codegenx.ai_service.hook import HookContext, HookEvent, on
-from codegenx.ai_service.memory import metrics
 
 
 # ── 第一级：轻量信号正则（§4.1 四类）────────────────────────────────────────────
@@ -118,7 +117,6 @@ async def process_turn_signal(
             dedup=True,
         )
         if enqueued is not None:
-            metrics.inc_extract_triggered(reason)
             log.debug(
                 "[funnel] 会话 {} 触发提炼（{}）: signals={} tokens={}",
                 session_id, reason, pending_signals, pending_tokens,
@@ -142,7 +140,7 @@ async def process_session_end(
             dedup=True,
         )
         if enqueued is not None:
-            metrics.inc_extract_triggered("session_end")
+            log.debug("[funnel] 会话结束触发提炼: {}", session_id)
     except Exception as exc:  # noqa: BLE001
         log.debug("[funnel] 会话结束触发失败（非致命）: {}", exc)
 

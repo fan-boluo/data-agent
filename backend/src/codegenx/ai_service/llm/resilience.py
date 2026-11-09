@@ -136,7 +136,13 @@ def _llm_span(model: str, messages: List[Dict[str, Any]]):
         }
     else:
         input_data = {"messages": messages}
-    return start_span("llm", get_current_agent() or "llm", input_data=input_data)
+    # model 随 span 创建即写入：失败调用也能按模型归因（成功路径的 add_attributes 会覆盖同值）
+    return start_span(
+        "llm",
+        get_current_agent() or "llm",
+        attributes={"model": model},
+        input_data=input_data,
+    )
 
 
 # ── 三态熔断器 ──────────────────────────────────────────────────────────────
@@ -279,6 +285,8 @@ def get_breaker(model_name: str) -> CircuitBreaker:
             half_open_success_rate=cfg.breaker_half_open_success_rate,
         )
         _breakers[key] = breaker
+        # 预热即上报 0：无重试时也有序列，看板"重试中"列才常驻可见
+        _set_gauge("llm_retrying", 0, model=model_name)
         log.info("[llm_breaker] {} 已创建 state={}", key, breaker.state)
     return breaker
 

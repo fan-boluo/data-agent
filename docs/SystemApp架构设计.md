@@ -40,10 +40,10 @@
 | 5 | agent_registry | AgentRegistry | 智能体规格注册表（AgentSpec：id / role / name / cls / tools 白名单） |
 | 6 | session_persistence | SessionPersistence | 会话快照落盘 + 按 (user, app, session) 锁表 |
 | 7 | task_board | TaskBoardService | 任务看板（按 request 维度 JSON 落盘，task_id 从 1 计数） |
-| 8 | memory_manager | MemoryFacade | 三级记忆管理（Hot / Warm / Session），qdrant 预热 + ensure_warm_collection |
+| 8 | memory_manager | MemoryFacade | 两级记忆管理（Hot / Warm ），PostgreSQL 连接池预热 + ensure_memory_schema |
 | 9 | session_summary | SessionSummaryService | 会话摘要提取（阈值状态 SummaryState 随会话生灭） |
 | 10 | compaction | CompactionService | 上下文压缩（LLM 韧性链 + 会话级熔断器） |
-| 11 | chat_message_store | ChatMessageStore | 聊天记录 MySQL DAO |
+| 11 | chat_message_store | ChatMessageStore | 聊天记录 PostgreSQL DAO（月分区） |
 | 12 | message_bus | MessageBus | 消息总线（SSE 事件发布，不承载 agent 间消息） |
 | 13 | trace_maintenance | MonitorMaintenanceService | 全链路追踪 + 周期维护任务 |
 | 14 | memory_scheduler | MemoryScheduler | 记忆调度器（崩溃恢复 + 轮询循环） |
@@ -100,7 +100,7 @@ main.py lifespan（FastAPI 入口）
 └─ shutdown：await stop_app()
     ├─ _app.async_before_stop()  注册逆序广播
     └─ 基础设施兜底（suppress 全部异常，close 幂等）：
-        redis_client.aclose() → shutdown_qdrant_client() → shutdown_mysql_engine() → shutdown_postgres_engine()
+        redis_client.aclose() → shutdown_mysql_engine() → shutdown_postgres_engine()
 ```
 
 **幂等守卫**：`_components_ready` 防重复注册；`_started` 防重复启动。
@@ -181,7 +181,7 @@ get_app().memory.warm_extract(query)
 
 关闭（异步 stop_app）
   ├─ async_before_stop()：按注册逆序广播，单组件异常只记日志、其余照常收尾
-  └─ 基础设施单例（redis / qdrant / mysql / postgres）由容器统一 suppress 兜底释放
+  └─ 基础设施单例（redis / mysql / postgres）由容器统一 suppress 兜底释放
 ```
 
 ### 关键约束

@@ -196,6 +196,34 @@ export interface MonitorThresholdRuleConfig {
   windowSize?: number
 }
 
+export interface MonitorToolDailyStat {
+  toolName: string
+  date: string
+  total: number
+  success: number
+  failure: number
+}
+
+export interface MonitorToolDailyStats {
+  days: number
+  dates: string[]
+  records: MonitorToolDailyStat[]
+}
+
+export interface MonitorLlmDailyStat {
+  modelName: string
+  date: string
+  total: number
+  success: number
+  failure: number
+}
+
+export interface MonitorLlmDailyStats {
+  days: number
+  dates: string[]
+  records: MonitorLlmDailyStat[]
+}
+
 export interface MonitorConfigResponse {
   enabled: boolean
   storage: MonitorStorageConfig

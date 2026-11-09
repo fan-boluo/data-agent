@@ -49,17 +49,13 @@ async def record_hits(app_id: str, user_id: str, memory_ids: list[str]) -> None:
 async def _fallback_direct(app_id: str, user_id: str, memory_ids: list[str]) -> None:
     """Redis 不可用兜底：按 memory_id 查 id 后走原 DB 直写。"""
     try:
-        from sqlalchemy import text
-        from db.mysql.session import session_maker
-        async with session_maker() as session:
-            rows = (
-                await session.execute(
-                    text("SELECT id FROM agent_memory "
-                         "WHERE app_id = :a AND user_id = :u AND memory_id IN :mids"),
-                    {"a": str(app_id), "u": str(user_id), "mids": tuple(memory_ids)},
-                )
-            ).all()
+        from db.postgres.postgres_client import memory_fetch
         from codegenx.ai_service.memory.memory_store import batch_touch_hit
+        rows = await memory_fetch(
+            "SELECT id FROM memory.agent_memory "
+            "WHERE app_id = $1 AND user_id = $2 AND memory_id = ANY($3::text[])",
+            str(app_id), str(user_id), list(memory_ids),
+        )
         await batch_touch_hit(app_id, user_id, [int(r[0]) for r in rows])
     except Exception as exc:  # noqa: BLE001 — 命中登记失败不影响检索
         log.debug("hit 兜底直写失败（非致命）:{}", exc)

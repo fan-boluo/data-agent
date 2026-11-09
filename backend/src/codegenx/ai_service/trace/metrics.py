@@ -23,13 +23,12 @@ from shared import log
 sessions_total = Counter(
     "codegenx_sessions_total",
     "Total agent sessions created",
-    ["app_id", "status"],
 )
 
+# 当前运行中的会话数：全局一个值（不按 app 拆分，看板直接展示当前值）
 active_sessions = Gauge(
     "codegenx_active_sessions",
     "Currently running agent sessions",
-    ["app_id"],
 )
 
 # ---------------------------------------------------------------------------
@@ -106,6 +105,12 @@ llm_last_failure_seconds = Gauge(
     "Unix ts of the most recent failed attempt (outcome=错误分类)",
     ["model", "outcome"],
 )
+# 最近失败的归因：trace_id + 分类（值恒 1；每模型只保留一条，换 trace 时移除旧序列）
+llm_last_failure_info = Gauge(
+    "codegenx_llm_last_failure_info",
+    "Latest LLM failure attribution: trace_id + error_class (value always 1)",
+    ["model", "error_class", "trace_id"],
+)
 llm_circuit_state = Gauge(
     "codegenx_llm_circuit_state",
     "Circuit breaker state (0=closed 1=half_open 2=open)",
@@ -115,17 +120,15 @@ llm_circuit_state = Gauge(
 # ---------------------------------------------------------------------------
 # 工具
 # ---------------------------------------------------------------------------
-tool_calls_total = Counter(
-    "codegenx_tool_calls_total",
-    "Total tool invocations",
-    ["app_id", "tool_name", "status"],
-)
+# 调用量/成功率不在监控侧统计：前端按 telemetry.tool_semantics 出「每工具每日折线+表」
+# dispatch_agent 不采集延迟：其耗时=子 Agent 全流程（数十秒），会把真实工具 P95 掩盖
+_LATENCY_EXCLUDED_TOOLS = {"dispatch_agent"}
 
 tool_latency_seconds = Histogram(
     "codegenx_tool_latency_seconds",
     "Tool execution latency",
     ["app_id", "tool_name"],
-    buckets=[0.01, 0.05, 0.1, 0.5, 1, 2, 5, 10, 30],
+    buckets=[0.01, 0.05, 0.1, 0.5, 1, 2, 5, 10, 30, 60, 120],
 )
 
 # 工具级熔断（P0-2）：与模型级同构的三态状态机，按工具/数据源独立计数
@@ -135,93 +138,64 @@ tool_circuit_state = Gauge(
     ["tool_name"],
 )
 
-# 最近一次工具失败时间戳（按失败分类；circuit_open 不算失败原因，不喂此指标）
-tool_last_failure_seconds = Gauge(
-    "codegenx_tool_last_failure_seconds",
-    "Unix ts of the most recent tool failure (arg_invalid=LLM入参问题 execution=执行失败 timeout=超时)",
-    ["tool_name", "error_class"],
+# 连续失败起点时间戳：now - 该值 = 已连续失败多久（成功即清零）
+tool_failure_streak_since_seconds = Gauge(
+    "codegenx_tool_failure_streak_since_seconds",
+    "Unix ts of the first failure in the current consecutive-failure streak (0=no streak)",
+    ["tool_name"],
+)
+
+# 本轮连续失败中最近一次失败的时间戳（成功即清零，仅在有 streak 时有意义）
+tool_failure_last_seconds = Gauge(
+    "codegenx_tool_failure_last_seconds",
+    "Unix ts of the latest failure in the current consecutive-failure streak (0=no streak)",
+    ["tool_name"],
+)
+
+# 最近一次失败的归因：trace_id（反查 telemetry.trace_spans 的入参/异常）+ 失败分类
+# 基数由 remove() 控制：每个工具只保留当前这一条，避免序列累积
+tool_last_failure_info = Gauge(
+    "codegenx_tool_last_failure_info",
+    "Latest tool failure attribution (value always 1)",
+    ["tool_name", "trace_id", "error_class"],
 )
 
 # ---------------------------------------------------------------------------
-# Memory（memory/metrics.py 喂入 warm_extract 任务指标）
+# Memory（memory/metrics.py 喂入）——只保留两类：当前状态 Gauge（可告警）+ 质量
+# 趋势 Counter；任务完成明细以 memory_task / memory_sync_checkpoint 表为真源，
+# 纯描述性事件计数（触发原因/拒绝原因/对账修复数/归档数）不进指标，走日志与库。
 # ---------------------------------------------------------------------------
+# 提炼任务结果趋势（status: ok/failed/dead）——随时间看错误率，反映提炼质量
 memory_extract_total = Counter(
     "codegenx_memory_extract_total",
     "warm_extract task outcomes",
     ["app_id", "status"],
 )
-memory_extract_latency_seconds = Histogram(
-    "codegenx_memory_extract_latency_seconds",
-    "warm_extract task wall-clock duration",
-    ["app_id"],
-    buckets=[1, 5, 10, 30, 60, 120, 300],
+# 任务队列水位（patrol 每 60s 刷新）：pending 积压=该提炼没提炼
+memory_task_pending = Gauge(
+    "codegenx_memory_task_pending",
+    "memory_task rows in status='pending'",
 )
-memory_extract_triggered_total = Counter(
-    "codegenx_memory_extract_triggered_total",
-    "warm_extract enqueue by trigger reason",
-    ["reason"],
-)
-memory_write_rejected_total = Counter(
-    "codegenx_memory_write_rejected_total",
-    "Candidate memories rejected at admission",
-    ["reason"],
+memory_task_running = Gauge(
+    "codegenx_memory_task_running",
+    "memory_task rows in status='running'",
 )
 memory_task_dead = Gauge(
     "codegenx_memory_task_dead",
-    "memory_task rows in status='dead'",
+    "memory_task rows in status='dead' (retries exhausted)",
 )
-memory_task_stuck_reclaimed_total = Counter(
-    "codegenx_memory_task_stuck_reclaimed_total",
-    "Stuck running tasks reset to pending by patrol",
-)
-
-memory_vector_pending = Gauge(
-    "codegenx_memory_vector_pending",
-    "Rows with vector_synced_at IS NULL (layer=2)",
-)
-memory_vector_sync_fail_total = Counter(
-    "codegenx_memory_vector_sync_fail_total",
-    "Vector forward-sync batch failures",
-)
-memory_reconcile_missing_total = Counter(
-    "codegenx_memory_reconcile_missing_total",
-    "Reconcile: MySQL has / Qdrant missing, repaired",
-)
-memory_reconcile_ghost_total = Counter(
-    "codegenx_memory_reconcile_ghost_total",
-    "Reconcile: Qdrant ghosts cleaned",
-)
-memory_reconcile_spotcheck_miss_total = Counter(
-    "codegenx_memory_reconcile_spotcheck_miss_total",
-    "Spot-check samples not recalled by own summary",
-)
-
+# 向量同步积压已随 pgvector 迁移下线：向量与记忆行同表同事务，无待同步队列。
+# 一致性检验新鲜度/抽检未命中同样下线：单表无「双源分叉」，无需对账。
+# hot 层注入水位（最近一次采样的用户维度值）
 memory_hot_token_usage_ratio = Gauge(
     "codegenx_memory_hot_token_usage_ratio",
     "hot injection tokens / budget (latest user sampled)",
 )
-memory_hot_count = Gauge(
-    "codegenx_memory_hot_count",
-    "Active hot entries for the latest sampled user",
-)
+# 降级事件（罕见且关键，按 increase(...[15m]) 告警）
 memory_degrade_total = Counter(
     "codegenx_memory_degrade_total",
     "Memory subsystem degradations",
     ["kind"],
-)
-
-memory_conflict_detected_total = Counter(
-    "codegenx_memory_conflict_detected_total",
-    "Conflict pairs resolved by daily conflict_detect",
-)
-_merged_total = Counter(
-    "codegenx_memory_consolidate_merged_total",
-    "Duplicate warm entries merged by consolidate",
-)
-memory_archived_total = Counter(
-    "codegenx_memory_archived_total",
-    "warm entries soft-deleted / archived",
-    ["action"],
 )
 
 # ---------------------------------------------------------------------------
@@ -242,6 +216,12 @@ embedding_last_failure_seconds = Gauge(
     "codegenx_embedding_last_failure_seconds",
     "Unix ts of the most recent embedding batch failure (timeout/rate_limit/auth/connection/other)",
     ["model", "error_class"],
+)
+# 最近失败的归因：trace_id + 分类（值恒 1；每模型只保留一条，换 trace 时移除旧序列）
+embedding_last_failure_info = Gauge(
+    "codegenx_embedding_last_failure_info",
+    "Latest embedding failure attribution: trace_id + error_class (value always 1)",
+    ["model", "error_class", "trace_id"],
 )
 # embedding 级熔断（通用 CircuitBreaker 以 metric_prefix 反射引用）
 embedding_circuit_state = Gauge(
@@ -276,6 +256,7 @@ def feed_embedding_call(
     if error_class:
         embedding_calls_total.labels(model=model, outcome="error").inc()
         embedding_last_failure_seconds.labels(model=model, error_class=error_class).set(time.time())
+        _set_failure_attr(embedding_last_failure_info, _embedding_failure_attr, model, error_class)
         return
     embedding_calls_total.labels(model=model, outcome="ok").inc()
     embedding_latency_seconds.labels(model=model).observe(max(0.0, latency_s))
@@ -319,19 +300,64 @@ class StreakTracker:
     def __init__(self) -> None:
         self._lock = Lock()
         self._tool_failure: dict[str, int] = {}      # tool_name → streak（全局，跨会话）
+        self._tool_failure_since: dict[str, float] = {}   # tool_name → 本轮 streak 起点 ts
+        self._tool_failure_last: dict[str, float] = {}    # tool_name → 本轮最近失败 ts
+        self._tool_failure_info: dict[str, tuple[str, str]] = {}  # tool_name → (trace_id, error_class)
         self._context_breach: dict[str, int] = {}    # session_id → streak
 
-    def track_tool_outcome(self, *, session_id: str, tool_name: str, is_error: bool) -> None:
+    def track_tool_outcome(self, *, session_id: str, tool_name: str, is_error: bool,
+                           trace_id: str = "", error_class: str = "") -> None:
         """同一工具全局连续失败 streak（告警规则 ToolConsecutiveFailures 消费）。
 
         按工具计数、跨会话：该工具任一次成功即清零；session_id 仅用于日志定位。
+        同时维护本轮连续失败的起点/最近失败时间与最近一次失败的 trace_id+分类，
+        让「工具当前连续失败」一个面板就能定位到具体某次请求。
         """
+        now = time.time()
+        old_info: tuple[str, str] | None = None
         with self._lock:
-            streak = self._tool_failure.get(tool_name, 0) + 1 if is_error else 0
-            self._tool_failure[tool_name] = streak
+            if is_error:
+                streak = self._tool_failure.get(tool_name, 0) + 1
+                self._tool_failure[tool_name] = streak
+                # 起点只在 streak 从 0→1 时记录，后续失败沿用，成功清零
+                since = self._tool_failure_since.get(tool_name) or now
+                self._tool_failure_since[tool_name] = since
+                self._tool_failure_last[tool_name] = now
+                old_info = self._tool_failure_info.get(tool_name)
+                if error_class == "circuit_open" and old_info:
+                    # 熔断快速失败只累加 streak，不覆盖真实归因（保留导致熔断的那次 trace/分类）
+                    new_info = old_info
+                else:
+                    new_info = (trace_id or "unknown", error_class or "unknown")
+                    self._tool_failure_info[tool_name] = new_info
+            else:
+                streak = 0
+                since = 0.0
+                self._tool_failure[tool_name] = 0
+                self._tool_failure_since.pop(tool_name, None)
+                self._tool_failure_last.pop(tool_name, None)
+                old_info = self._tool_failure_info.pop(tool_name, None)
+                new_info = None
+
         tool_failure_streak.labels(tool_name=tool_name).set(streak)
+        tool_failure_streak_since_seconds.labels(tool_name=tool_name).set(since)
+        tool_failure_last_seconds.labels(tool_name=tool_name).set(
+            self._tool_failure_last.get(tool_name, 0.0)
+        )
+        # info 序列只保留当前这一条：归因变化或恢复成功时移除旧 label，避免序列累积
+        if old_info and old_info != new_info:
+            try:
+                tool_last_failure_info.remove(tool_name, *old_info)
+            except KeyError:
+                pass
+        if new_info:
+            tool_last_failure_info.labels(
+                tool_name=tool_name, trace_id=new_info[0], error_class=new_info[1],
+            ).set(1)
+
         if streak >= 3:
-            log.warning("Tool failure streak={} tool={} session={}", streak, tool_name, session_id)
+            log.warning("Tool failure streak={} tool={} session={} trace_id={} since={}",
+                        streak, tool_name, session_id, new_info[0] if new_info else "-", int(since))
 
     def track_context_breach(self, *, session_id: str, token_usage: float, is_compress: bool) -> None:
         """上下文连续超阈值未压缩 streak（report_context_usage 每 step 喂入）。
@@ -360,6 +386,10 @@ class StreakTracker:
 
 _tracker: StreakTracker | None = None
 _tracker_lock = Lock()
+# 最近失败归因的序列清理：model → (error_class, trace_id)
+_failure_attr_lock = Lock()
+_llm_failure_attr: dict[str, tuple[str, str]] = {}
+_embedding_failure_attr: dict[str, tuple[str, str]] = {}
 
 
 def get_streak_tracker() -> StreakTracker:
@@ -376,15 +406,15 @@ def get_streak_tracker() -> StreakTracker:
 # recorder 喂入 helper（载荷来自 hook ctx，非 telemetry 对象）
 # ---------------------------------------------------------------------------
 
-def feed_session_start(*, app_id: str, status: str = "running") -> None:
-    """session 建立：总数 +1、活跃 +1。"""
-    sessions_total.labels(app_id=app_id, status=status).inc()
-    active_sessions.labels(app_id=app_id).inc()
+def feed_session_start() -> None:
+    """session 建立：总数 +1、活跃 +1（全局单值，不分 app）。"""
+    sessions_total.inc()
+    active_sessions.inc()
 
 
-def feed_session_end(*, app_id: str) -> None:
+def feed_session_end() -> None:
     """session 结束：活跃 -1（时长不采集——会话由空闲超时关闭，时长无排障价值）。"""
-    active_sessions.labels(app_id=app_id).dec()
+    active_sessions.dec()
 
 
 def feed_turn_end(*, app_id: str, status: str, duration_ms: float) -> None:
@@ -411,25 +441,57 @@ def feed_llm_attempt(
         get_streak_tracker().track_llm_latency(model=model, latency_s=total_ms / 1000)
     else:
         # 最近一次失败时间戳（结合熔断状态判断是否已恢复；outcome 去掉 error_ 前缀）
-        llm_last_failure_seconds.labels(
-            model=model, outcome=outcome.removeprefix("error_"),
-        ).set(time.time())
+        cls = outcome.removeprefix("error_")
+        llm_last_failure_seconds.labels(model=model, outcome=cls).set(time.time())
+        _set_failure_attr(llm_last_failure_info, _llm_failure_attr, model, cls)
+
+
+def _set_failure_attr(gauge: Gauge, store: dict[str, tuple[str, str]],
+                      model: str, error_class: str) -> None:
+    """记录"最近一次失败的 trace_id + 分类"。
+
+    每模型只保留一条序列：换 trace 时先 remove 旧 label，否则每次失败都会新增时间序列。
+    """
+    new = (error_class or "unknown", _current_trace_id() or "unknown")
+    with _failure_attr_lock:
+        old = store.get(model)
+        store[model] = new
+    if old and old != new:
+        try:
+            gauge.remove(model, *old)
+        except KeyError:
+            pass
+    gauge.labels(model=model, error_class=new[0], trace_id=new[1]).set(1)
+
+
+def _current_trace_id() -> str:
+    """当前请求的 trace_id（不在请求上下文时返回空串，不影响打点）。"""
+    try:
+        from codegenx.ai_service.trace.context import get_turn_binding
+
+        binding = get_turn_binding()
+        return str(getattr(binding, "trace_id", "") or "")
+    except Exception:
+        return ""
 
 
 def feed_tool_call(*, app_id: str, session_id: str, tool_name: str, is_error: bool,
                    latency_ms: float, error_class: str = "") -> None:
-    """单次工具调用：计数/延迟 + 连续失败 streak + 最近失败时间戳（按分类）。
+    """单次工具调用：延迟 + 连续失败 streak（含起点/最近失败时间与 trace_id）。
 
     分类口径：arg_invalid=LLM 传入参数/SQL 有问题（业务失败，不计熔断）、
-    execution=工具执行本身失败（连接/资源/驱动，计入熔断）、timeout=超时（计入熔断）。
-    circuit_open 是熔断的结果而非失败原因，不进"最近失败"（熔断状态已体现）。
+    execution=工具执行本身失败（连接/资源/驱动，计入熔断）、timeout=超时（计入熔断）、
+    subagent_failed=dispatch_agent 子 Agent 未产出结果（不计熔断，归因到子 Agent 而非工具本身）。
+    circuit_open 是熔断的结果而非失败原因，同样计入连续失败（该工具确实在快速失败）。
     """
-    status = "error" if is_error else "ok"
-    tool_calls_total.labels(app_id=app_id, tool_name=tool_name, status=status).inc()
-    tool_latency_seconds.labels(app_id=app_id, tool_name=tool_name).observe(max(0.0, latency_ms) / 1000)
-    if is_error and error_class and error_class != "circuit_open":
-        tool_last_failure_seconds.labels(tool_name=tool_name, error_class=error_class).set(time.time())
-    get_streak_tracker().track_tool_outcome(session_id=session_id, tool_name=tool_name, is_error=is_error)
+    if tool_name not in _LATENCY_EXCLUDED_TOOLS:
+        tool_latency_seconds.labels(app_id=app_id, tool_name=tool_name).observe(
+            max(0.0, latency_ms) / 1000
+        )
+    get_streak_tracker().track_tool_outcome(
+        session_id=session_id, tool_name=tool_name, is_error=is_error,
+        trace_id=_current_trace_id(), error_class=error_class,
+    )
 
 
 def feed_error(*, app_id: str, scope: str, error_type: str = "") -> None:

@@ -45,14 +45,14 @@ class MemoryFacade(BaseComponent):
 
     async def async_before_start(self) -> None:
         """基础设施预热（迁自旧 SystemApp._startup_infra）：
-        qdrant/MySQL 暂不可用只降级记忆功能，不阻断主服务。"""
+        PostgreSQL/pgvector 暂不可用只降级记忆功能，不阻断主服务。"""
         with suppress(Exception):
-            from db.qdrant.client import warm_up_qdrant_client
-            from codegenx.ai_service.memory.vector_store import ensure_warm_collection
+            from db.postgres.postgres_client import get_memory_pool
+            from codegenx.ai_service.memory.store_init import ensure_memory_schema
 
-            await warm_up_qdrant_client()
-            await ensure_warm_collection()
-            log.info("warm_memories collection 已就绪")
+            await get_memory_pool()
+            await ensure_memory_schema()
+            log.info("记忆域 PostgreSQL（memory/message schema）已就绪")
 
     async def load(
         self,

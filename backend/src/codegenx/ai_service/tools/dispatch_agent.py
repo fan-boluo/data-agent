@@ -155,8 +155,10 @@ class DispatchAgentTool(BaseTool):
         #          agent, "成功" if success else "失败", task_id, len(result_text))
 
         # 失败/空结果以失败说明回填（LLM 自纠：改口径重派或如实汇总）
+        # 归因 subagent_failed：不是参数错也不是基础设施故障，不计工具熔断
         if child_msg is None:
-            return ToolResult(success=False, message="执行失败：子智能体未返回结果")
+            return ToolResult(success=False, message="执行失败：子智能体未返回结果", error_class="subagent_failed")
         if success:
             return ToolResult(success=True, data=result_text or "执行完成，但子智能体未返回结果文本。")
-        return ToolResult(success=False, message=f"执行失败：{result_text or '（无失败说明）'}")
+        return ToolResult(success=False, message=f"执行失败：{result_text or '（无失败说明）'}",
+                          error_class="subagent_failed")

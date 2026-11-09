@@ -12,11 +12,10 @@ networks:
     driver: bridge
 
 volumes:
-  mysql_data:        # MySQL 数据（用户类数据、记忆真源）
-  pg_data:           # PostgreSQL 主库数据
+  mysql_data:        # MySQL 数据（平台业务表：应用/用户/成员）
+  pg_data:           # PostgreSQL 主库数据（语义层 + 记忆 + 交互记录）
   redis_data:        # Redis 持久化数据
-  qdrant_data:       # Qdrant 向量数据
-  dataagent_data:     # 后端运行时数据（看板 JSON、会话快照、聊天记录）
+  dataagent_data:     # 后端运行时数据（看板 JSON、会话快照、归档 zip）
   prometheus_data:   # Prometheus TSDB（监控 profile）
   grafana_data:      # Grafana 看板与用户配置（监控 profile）
 
@@ -39,7 +38,6 @@ services:
       MYSQL_HOST: host.docker.internal
       POSTGRES_HOST: host.docker.internal
       REDIS_HOST: host.docker.internal
-      QDRANT_URL: host.docker.internal   # Qdrant 使用宿主机本地服务（保留既有向量数据）
       USERDB_HOST: host.docker.internal  # 用户项目库使用宿主机 PG
       PROJECT_ROOT_DIR: /app    # 容器内源码扁平布局，覆盖 constants.py 的 parents[3] 推算
     extra_hosts:
@@ -84,7 +82,8 @@ services:
       retries: 3
 
   # ═══════════════════════════════════════════════════════════
-  # ③ MySQL（用户类数据 + 记忆真源）
+  # ③ MySQL（平台业务表：应用 / 用户 / 成员）
+  #    记忆与交互记录已迁至 PostgreSQL，MySQL 不再承载大表
   # ═══════════════════════════════════════════════════════════
   mysql:
     image: mysql:8.0
@@ -109,9 +108,8 @@ services:
     volumes:
       - mysql_data:/var/lib/mysql
       # 首次初始化（数据卷为空时）按文件名顺序自动执行：
-      #   01 建库建表 → 02 记忆表 → 03 初始化用户（admin / boluo123）
+      #   01 建库建表 → 02 初始化用户（admin / boluo123）
       - ./init/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
-      - ./init/memory_schema.sql:/docker-entrypoint-initdb.d/02_memory_schema.sql:ro
       - ./init/seed.sql:/docker-entrypoint-initdb.d/03_seed.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
@@ -123,7 +121,7 @@ services:
       - dataagent-net
 
   # ═══════════════════════════════════════════════════════════
-  # ④ PostgreSQL（主业务库 + 语义层 + pgvector）
+  # ④ PostgreSQL（语义层 + 记忆 + 交互记录，pgvector 承载向量）
   # ═══════════════════════════════════════════════════════════
   postgres:
     image: pgvector/pgvector:pg16
@@ -141,9 +139,10 @@ services:
     volumes:
       - pg_data:/var/lib/postgresql/data
       # 首次初始化（数据卷为空时）按文件名顺序自动执行：
-      #   01 语义层 schema + pgvector → 02 监控 telemetry schema
+      #   01 语义层 schema → 02 监控 telemetry schema → 03 记忆 + 交互记录（含月分区）
       - ./init/semantic_schema.sql:/docker-entrypoint-initdb.d/01_semantic_schema.sql:ro
       - ./init/telemetry_schema.sql:/docker-entrypoint-initdb.d/02_telemetry_schema.sql:ro
+      - ./init/pg_memory_schema.sql:/docker-entrypoint-initdb.d/03_pg_memory_schema.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
       interval: 10s
@@ -176,25 +175,7 @@ services:
       - dataagent-net
 
   # ═══════════════════════════════════════════════════════════
-  # ⑥ Qdrant（向量存储）
-  # ═══════════════════════════════════════════════════════════
-  qdrant:
-    image: qdrant/qdrant:latest
-    container_name: dataagent-qdrant
-    restart: unless-stopped
-    # 默认不启动：开发环境使用宿主机本地 Qdrant
-    profiles: ["localdb"]
-    ports:
-      - "${QDRANT_HOST_PORT:-6333}:6333"   # REST API + 内置 Web UI (/dashboard)
-      - "6334:6334"                        # gRPC
-    volumes:
-      - qdrant_data:/qdrant/storage
-    # 注意：官方镜像无 curl/wget，不做容器内健康检查；进程起监听即就绪（秒级）
-    networks:
-      - dataagent-net
-
-  # ═══════════════════════════════════════════════════════════
-  # ⑦ 监控栈（可选，不影响正常启停）
+  # ⑥ 监控栈（可选，不影响正常启停）
   #    启动：docker compose --profile monitoring up -d
   #    链路：backend /metrics → Prometheus → Grafana 看板
   #                                └─ 规则 → Alertmanager → alert-sink
@@ -222,6 +203,8 @@ services:
       - ./infra/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml.tpl:ro
       - ./infra/monitoring/prometheus_alerts.yml:/etc/prometheus/prometheus_alerts.yml:ro
       - prometheus_data:/prometheus
+    environment:
+      TZ: Asia/Shanghai   # 容器内时间/告警时间戳统一 +8
     ports:
       - "${PROMETHEUS_PORT:-9090}:9090"
     networks:
@@ -232,6 +215,8 @@ services:
     container_name: dataagent-alertmanager
     restart: unless-stopped
     profiles: ["monitoring"]
+    environment:
+      TZ: Asia/Shanghai   # 告警触发/恢复时间显示 +8
     volumes:
       - ./infra/monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
     ports:
@@ -259,6 +244,7 @@ services:
     restart: unless-stopped
     profiles: ["monitoring"]
     environment:
+      TZ: Asia/Shanghai   # 面板/告警时间轴 +8（看板 timezone 已固定 Asia/Shanghai）
       GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
       GF_USERS_ALLOW_SIGN_UP: "false"

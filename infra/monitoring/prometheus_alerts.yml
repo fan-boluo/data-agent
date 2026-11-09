@@ -180,3 +180,57 @@ groups:
             Embedding circuit {{ $labels.circuit }} has been OPEN for over 30s.
             Memory vector sync / semantic vector recall are degraded to
             keyword-only until a half-open probe succeeds.
+
+  # ===========================================================================
+  # Memory 定时任务告警（任务完成明细以 memory_task / memory_sync_checkpoint 表
+  # 为真源；这里只对"当前状态异常"报警，描述性明细查库/日志）
+  # ===========================================================================
+  - name: memory_alerts
+    interval: 60s
+    rules:
+
+      # -----------------------------------------------------------------------
+      # M1. 记忆任务重试耗尽（退避 1m/5m/30m 共 4 次尝试全败后置 dead）
+      # -----------------------------------------------------------------------
+      - alert: MemoryTaskDead
+        expr: codegenx_memory_task_dead > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Memory tasks exhausted retries: {{ $value }} dead"
+          description: >
+            {{ $value }} memory task(s) are dead after exhausting retries
+            (1m/5m/30m backoffs, ~4 consecutive failures). Check
+            memory.memory_task.last_error in PostgreSQL for the failure reason
+            (extract model outage / PostgreSQL / embedding).
+
+      # -----------------------------------------------------------------------
+      # M2. 记忆任务队列积压（该提炼没提炼：pending 持续 > 50）
+      # -----------------------------------------------------------------------
+      - alert: MemoryTaskBacklog
+        expr: codegenx_memory_task_pending > 50
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Memory task queue backlog: {{ $value }} pending"
+          description: >
+            Pending memory tasks have exceeded 50 for 10 minutes — extraction
+            is not keeping up (consumer stalled or LLM unavailable). Check
+            MemoryScheduler logs and the extract model circuit state.
+
+      # -----------------------------------------------------------------------
+      # M3. 记忆子系统降级（15 分钟内出现任一降级事件：postgres/redis/embedding/timeout）
+      # -----------------------------------------------------------------------
+      - alert: MemoryDegrade
+        expr: increase(codegenx_memory_degrade_total[15m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Memory subsystem degraded: {{ $labels.kind }}"
+          description: >
+            Memory subsystem degraded (kind={{ $labels.kind }}) in the last 15
+            minutes. Affected paths fall back gracefully, but the dependency
+            should be checked.

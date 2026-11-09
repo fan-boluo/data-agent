@@ -274,7 +274,7 @@ async def start_app(app: SystemApp | None = None) -> SystemApp:
 
 async def stop_app(app: SystemApp | None = None) -> None:
     """逆序关闭（lifespan shutdown 调用）：广播 async_before_stop（注册逆序，异常隔离）
-    → 基础设施连接池收尾（redis/qdrant/mysql 为 db/ 模块级单例，不属于任何业务组件，
+    → 基础设施连接池收尾（redis/mysql/postgres 为 db/ 模块级单例，不属于任何业务组件，
     由容器统一兜底释放；自 main.py lifespan 收编，close 本身幂等）。"""
     app = app or get_app()
     if not app._started:
@@ -285,10 +285,6 @@ async def stop_app(app: SystemApp | None = None) -> None:
         from db.redis.redis_client import redis_client
 
         await redis_client.aclose()
-    with suppress(Exception):
-        from db.qdrant.client import shutdown_qdrant_client
-
-        await shutdown_qdrant_client()
     with suppress(Exception):
         from db.mysql.session import shutdown_mysql_engine
 

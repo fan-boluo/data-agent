@@ -23,6 +23,7 @@ class ToolResult(BaseModel):
     message:str = ""  # 失败原因
     render:str= ""  # 展示用
     extras: dict[str, Any] = {}  # 追踪/观测用附加数据（不进 LLM 上下文，由 hook 消费）
+    error_class: str = ""  # 失败分类（执行器透传给监控指标；空=按消息自动判定）
 
 
 class BaseTool(ABC):

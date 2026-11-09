@@ -49,7 +49,7 @@ Hook 是执行流上的**拦截 / 扩展点**，核心价值是把**横切关注
 | `file_tool_param_guard` | before_tool_call | 20 | `tools/base.py` | 文件工具参数守卫，可 blocked |
 | `sql_trace_start` | before_tool_call | 100 | `hook/analysis_trace.py` | SQL 工具调用追踪起点（condition=_is_execute_sql） |
 | `persist_tool_log` | after_tool_call | 10 | `chat_message/persist.py` | 工具执行日志落盘 |
-| `tool_semantics_recorder` | after_tool_call | 50 | `hook/tool_semantics.py` | 工具语义记录 |
+| `tool_semantics_recorder` | after_tool_call | 50 | `hook/tool_semantics.py` | 工具调用记录（全部工具入参/结果落表） |
 | `sql_trace_end` | after_tool_call | 100 | `hook/analysis_trace.py` | SQL 工具调用追踪终点 |
 | `memory_turn_signal` | on_turn_end | 20 | `memory/trigger.py` | 记忆系统轮次信号触发 |
 | `memory_session_end` | on_session_end | 20 | `memory/memory_manager.py` | 记忆系统会话末触发 |

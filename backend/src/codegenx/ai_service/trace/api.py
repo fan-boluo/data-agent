@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -119,7 +120,10 @@ async def start_span(
     agent_token = trace_context.push_agent(name) if op_type == "agent" else None
     try:
         yield handle
-    except BaseException as exc:  # 异常自动置 error 后原样上抛（含 CancelledError）
+    except (GeneratorExit, asyncio.CancelledError):
+        # 用户停止/任务取消：链路中断，不算 span 失败（否则 stop 也会在 span 列表里报错）
+        raise
+    except BaseException as exc:  # 异常自动置 error 后原样上抛
         handle.set_status(ok=False, error=str(exc) or type(exc).__name__)
         raise
     finally:

@@ -1,3 +1,6 @@
+"""
+skill　暂时没有加，这个工具就先不注册了　取消继承　ＢａｓｅＴｏｏｌ
+"""
 import asyncio
 from typing import Any
 
@@ -5,7 +8,7 @@ from codegenx.ai_service.tools.base import BaseTool, ToolResult
 from shared import log
 
 
-class LoadSkillTool(BaseTool):
+class LoadSkillTool:
     @property
     def name(self) -> str:
         return "load_skill"

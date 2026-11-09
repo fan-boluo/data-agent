@@ -53,7 +53,7 @@ def set_turn_binding(binding: TurnBinding | None) -> Token | None:
 
 def reset_turn_binding(token: Token | None) -> None:
     if token is not None:
-        _turn_binding.reset(token)
+        _safe_reset(_turn_binding, token)
 
 
 def push_parent(span_id: str) -> Token:
@@ -62,7 +62,7 @@ def push_parent(span_id: str) -> Token:
 
 
 def pop_parent(token: Token) -> None:
-    _current_parent.reset(token)
+    _safe_reset(_current_parent, token)
 
 
 def push_agent(name: str) -> Token:
@@ -71,4 +71,14 @@ def push_agent(name: str) -> Token:
 
 
 def pop_agent(token: Token) -> None:
-    _current_agent.reset(token)
+    _safe_reset(_current_agent, token)
+
+
+def _safe_reset(var: ContextVar, token: Token) -> None:
+    """跨 Context 复位兜底：异步生成器被其他任务/GC 收尾时 token 属于另一个 Context，
+    reset 会抛 ValueError（"was created in a different Context"）。埋点复位失败不应
+    影响业务，更不该被上层当作 LLM 失败统计。"""
+    try:
+        var.reset(token)
+    except (ValueError, RuntimeError):
+        pass

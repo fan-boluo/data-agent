@@ -16,14 +16,13 @@ rule_files:
   - /etc/prometheus/prometheus_alerts.yml
 
 scrape_configs:
-  - job_name: prometheus
-    static_configs:
-      - targets: ['localhost:9090']
-
-  # 单后端应用（FastAPI，/metrics 由 prometheus_client 暴露）
+  # 单一服务：只抓后端（job 即服务标识，告警抑制按 job 分组）
   - job_name: dataagent-backend
     metrics_path: /metrics
     static_configs:
       - targets: ['__BACKEND_TARGET__']
-        labels:
-          service: dataagent-backend
+    metric_relabel_configs:
+      # 去掉 instance：本地进程与容器、重启换端口都会让同一模型/工具产生第二条序列
+      # （状态 Gauge 会因此在看板上出现重复图例、时间错位）
+      - regex: instance
+        action: labeldrop

@@ -59,7 +59,7 @@ async def format_hot_prompt(app_id: str, user_id: str) -> str:
         await hot_cache.set_cached_entries(app_id, user_id, hot_cache.to_cache_items(entries))
         items = hot_cache.to_cache_items(entries)
     if not items:
-        metrics.set_hot_gauges(0.0, 0)
+        metrics.set_hot_ratio(0.0)
         return ""
 
     # ── token 预算裁剪（每次现算，配置可在线调整）────────────────────────────────
@@ -74,7 +74,7 @@ async def format_hot_prompt(app_id: str, user_id: str) -> str:
             continue
         kept.append(it)
         used += cost
-    metrics.set_hot_gauges(used / max(1, budget), hot_count)
+    metrics.set_hot_ratio(used / max(1, budget))
 
     if dropped:
         # P0-13：截断必须可感知

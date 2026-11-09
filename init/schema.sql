@@ -53,27 +53,5 @@ create table if not exists app_member
     INDEX idx_userId (userId)               -- 加速查询"我参与的项目列表"
 ) comment '项目成员' collate = utf8mb4_unicode_ci;
 
--- 交互记录表
-CREATE TABLE if not exists `chat_message` (
-  `id`                BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-  `message_uid`       CHAR(36)        NOT NULL,
-  `user_id`           VARCHAR(32)     NOT NULL COMMENT '用户id（user_xxxx）',
-  `session_id`        CHAR(36)        NOT NULL,
-  `app_id`            VARCHAR(64)     NOT NULL,
-  `seq`               BIGINT UNSIGNED NOT NULL COMMENT '会话内单调递增,提炼位点的载体',
-  `role`              VARCHAR(16)     NOT NULL COMMENT 'user/assistant/tool',
-  `content`           MEDIUMTEXT      NULL COMMENT '整条消息的 JSON 序列化（含 tool_calls 等结构字段）',
-  `payload_ref`       VARCHAR(512)    NULL COMMENT '超长内容外置对象存储的 key',
-  `content_bytes`     INT UNSIGNED    NOT NULL DEFAULT 0,
-  `content_tokens`    INT UNSIGNED    NOT NULL DEFAULT 0 COMMENT '本条内容 token 数，全 role 有值；提炼触发与窗口预算用',
-  `model`             VARCHAR(64)     NULL,
-  `prompt_tokens`     INT UNSIGNED    NULL,
-  `completion_tokens` INT UNSIGNED    NULL,
-  `finish_reason`     VARCHAR(32)     NULL,
-  `created_at`        DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_message_uid` (`message_uid`),
-  UNIQUE KEY `uk_session_seq` (`session_id`, `seq`),
-  KEY `idx_extract_scan` (`user_id`, `session_id`, `seq`),
-  KEY `idx_user_created` (`user_id`, `created_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+-- 交互记录表 chat_message 已迁移至 PostgreSQL（月分区大表 + 与记忆同库）：
+--   见 init/pg_memory_schema.sql 的 message.chat_message，MySQL 侧不再保留。

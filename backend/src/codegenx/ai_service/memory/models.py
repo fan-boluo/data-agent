@@ -1,13 +1,12 @@
 """
-记忆条目数据模型 —— MySQL agent_memory 真源（设计方案 v2.1）的行结构与常量。
+记忆条目数据模型 —— PostgreSQL agent_memory 真源（设计方案 v2.1）的行结构与常量。
 
-一条记忆的落点（v2.1 起真源为 MySQL，json 文件降级为只读迁移源/导出视图）：
-  - MySQL agent_memory（唯一真源，hot/warm 同表分层，memory_layer 区分）
-  - Qdrant agent_memory_warm（仅 warm 层检索索引，payload 只存指针不存正文，
-    point id = agent_memory.id BIGINT 自增）
+一条记忆的落点（v2.1 起真源为 PostgreSQL，json 文件降级为只读迁移源/导出视图）：
+  - memory.agent_memory（唯一真源，hot/warm 同表分层，memory_layer 区分）
+  - 向量即同表 embedding 列（pgvector，HNSW 余弦索引，仅 warm 行非空）
 
 ULID（memory_id 业务主键）：48bit 毫秒时间戳 + 80bit 随机，字典序即时间序，
-仅用于排序/断点比较；向量库点位不再用它（Qdrant 只收无符号整数/UUID）。
+仅用于排序/断点比较；行定位用自增 id。
 """
 from __future__ import annotations
 
@@ -18,14 +17,14 @@ import time
 from dataclasses import asdict, dataclass, field
 
 # ── 分层（agent_memory.memory_layer）──────────────────────────────────────────
-LAYER_HOT = 1   # 结构化语义记忆：每轮全量注入，不进向量库，无时间衰减
-LAYER_WARM = 2  # 情景记忆：append-only，进 Qdrant 召回，参与时间衰减
+LAYER_HOT = 1   # 结构化语义记忆：每轮全量注入，embedding 恒 NULL，无时间衰减
+LAYER_WARM = 2  # 情景记忆：append-only，走 pgvector 语义召回，参与时间衰减
 
 # ── 状态（agent_memory.status）────────────────────────────────────────────────
 STATUS_ACTIVE = 1      # 正常生效
 STATUS_SUPERSEDED = 2  # 被 uk_slot 同槽位新记录取代（hot 专属语义）
 STATUS_REVOKED = 3     # 撤销（提炼出错/幻觉/用户要求/合规删除-软删）
-STATUS_ARCHIVED = 4    # 衰减软删（30 天未命中）；归档（90 天）后 Qdrant 物理删除
+STATUS_ARCHIVED = 4    # 衰减软删（30 天未命中）；归档（90 天）后置 valid_to，不再参与召回
 
 # ── 来源（agent_memory.source_type）──────────────────────────────────────────
 SOURCE_USER = 1      # 用户明说（可进 hot 层）
@@ -121,7 +120,7 @@ def new_ulid(ts_ms: int | None = None) -> str:
 class MemoryEntry:
     """agent_memory 一行（v2.1）。写入侧构造后交 memory_store 落库；
     读取侧由 DB 行经 from_row 还原。"""
-    id: int = 0                            # agent_memory.id（自增，Qdrant point id）
+    id: int = 0                            # agent_memory.id（自增主键）
     memory_id: str = field(default_factory=new_ulid)
     app_id: str = ""
     user_id: str = ""
@@ -149,7 +148,7 @@ class MemoryEntry:
 
     hit_count: int = 0
     last_hit_at: str = ""                  # ISO；空=未命中过（衰减用 COALESCE 回退 created_at）
-    vector_synced: bool = False            # True=已同步 Qdrant（warm 层）
+    vector_synced: bool = False            # 兼容字段：warm 行向量与行同事务写入，恒 True
 
     created_at: str = field(default_factory=_now_iso)
     updated_at: str = field(default_factory=_now_iso)
@@ -176,10 +175,14 @@ class MemoryEntry:
 
     @classmethod
     def from_row(cls, row: dict) -> "MemoryEntry":
-        """SQLAlchemy mappings() 行 → MemoryEntry。坏 content JSON 容错为原文。"""
+        """DB 行 → MemoryEntry。content/source_msg_ids 兼容 jsonb 两种返回形态：
+        asyncpg 默认返回 JSON 文本（str），驱动注册 codec 时返回 dict/list。"""
         content_raw = row.get("content")
         text, topic = "", ""
-        if isinstance(content_raw, (str, bytes)):
+        if isinstance(content_raw, dict):
+            text = str(content_raw.get("text", "") or "")
+            topic = str(content_raw.get("topic", "") or "")
+        elif isinstance(content_raw, (str, bytes)):
             try:
                 parsed = json.loads(content_raw)
                 if isinstance(parsed, dict):
@@ -190,13 +193,16 @@ class MemoryEntry:
             except (json.JSONDecodeError, TypeError):
                 text = str(content_raw)
         msgs = row.get("source_msg_ids")
-        if isinstance(msgs, (str, bytes)):
+        if isinstance(msgs, list):
+            pass
+        elif isinstance(msgs, (str, bytes)):
             try:
                 loaded = json.loads(msgs)
                 msgs = loaded if isinstance(loaded, list) else []
             except (json.JSONDecodeError, TypeError):
                 msgs = []
-        synced_at = row.get("vector_synced_at")
+        # 向量与行同表同事务写入（pgvector），warm 行天然已同步
+        synced_layer = int(row.get("memory_layer") or 0)
         return cls(
             id=int(row.get("id") or 0),
             memory_id=str(row.get("memory_id") or ""),
@@ -220,7 +226,7 @@ class MemoryEntry:
             source_agent=str(row.get("source_agent") or ""),
             hit_count=int(row.get("hit_count") or 0),
             last_hit_at=_dt_iso(row.get("last_hit_at")),
-            vector_synced=synced_at is not None,
+            vector_synced=synced_layer == 2,
             created_at=_dt_iso(row.get("created_at")) or _now_iso(),
             updated_at=_dt_iso(row.get("updated_at")) or _now_iso(),
         )

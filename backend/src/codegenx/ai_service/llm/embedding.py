@@ -3,7 +3,7 @@
 
   - 走 DashScope 兼容模式（OpenAI SDK 的 /embeddings 接口）
   - 模型与维度以 backend/config.json 的 embedding 配置为唯一来源
-    （维度即 Qdrant 建库维度，避免双配置漂移）
+    （维度即 pgvector 建表 vector(N) 的维度，避免双配置漂移）
   - 批量分片（BATCH_SIZE=10，DashScope 单次上限内）+ 截断 + 重试
   - 熔断（与 LLM/工具级同构的三态状态机）：服务硬宕时快速失败，
     避免每批都付出全额重试超时；调用方已有降级路径（关键词召回/留待补写）

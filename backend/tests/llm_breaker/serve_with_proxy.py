@@ -43,39 +43,21 @@ def _main() -> None:
     from shared.config.config import get_settings
 
     settings = get_settings()
-    print(f"[ENV] qdrant_url={settings.qdrant_url} port={settings.qdrant_port}")
+    print(f"[ENV] postgres={settings.postgres_host}:{settings.postgres_port}/{settings.postgres_db}")
 
-    # 预校验 Qdrant 连通性（启动期 vector_store 立即用到，Qdrant 未就绪会持续报错）
+    # 预校验 PostgreSQL 连通性（记忆表与向量同库，PG 未就绪会导致 warm 召回失败）
     try:
         import socket as _sk
         s = _sk.socket(); s.settimeout(2)
-        s.connect((settings.qdrant_url, int(settings.qdrant_port)))
+        s.connect((settings.postgres_host, int(settings.postgres_port)))
         s.close()
-        print(f"[OK] Qdrant {settings.qdrant_url}:{settings.qdrant_port} 连通")
+        print(f"[OK] PostgreSQL {settings.postgres_host}:{settings.postgres_port} 连通")
     except Exception as exc:
-        print(f"[WARN] Qdrant 未就绪：{exc}，先等 3s 再试一次...")
-        import time as _t
-        _t.sleep(3)
-        try:
-            s = _sk.socket(); s.settimeout(2)
-            s.connect((settings.qdrant_url, int(settings.qdrant_port)))
-            s.close()
-            print(f"[OK] Qdrant 就绪")
-        except Exception as exc2:
-            print(f"[ERROR] Qdrant 仍不可用：{exc2}，服务可能持续报 warm 检索失败")
+        print(f"[WARN] PostgreSQL 未就绪：{exc}，服务可能持续报 warm 检索失败")
 
     # 在任何 LLM client 创建前改写 apiBase，确保首个请求就走代理；不改 config.json
     agent_config.providers.dashscope.api_base = args.proxy_url
     _clients.clear()
-
-    # 在 create_app()（触发 SystemApp init）之前预热 Qdrant，打印实际 host/port
-    from db.qdrant.client import get_qdrant_client_manager
-    mgr = get_qdrant_client_manager()
-    try:
-        info = getattr(mgr.client, "_client", None) or getattr(mgr.client, "_url", None)
-        print(f"[QDRANT] manager → {info}")
-    except Exception as exc:
-        print(f"[QDRANT] manager → （探测失败 {exc}）")
 
     print(f"[OK] 服务监听 {args.host}:{args.port}")
     print(f"[OK] dashscope.api_base → {args.proxy_url}")

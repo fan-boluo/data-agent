@@ -1,17 +1,18 @@
-"""chat_message 表 DAO（async SQLAlchemy，raw SQL）。
+"""chat_message 表 DAO（asyncpg 原生，raw SQL）。
 
 职责：聊天消息的追加 / 水位增量读 / 会话最近消息查询 / 保留期清理。
 
 存储约定：
-- content 列 = 整条消息 dict 的 JSON 序列化（含 tool_calls / tool_call_id 等
+- content 列 = 整条消息 dict 的 JSON 序列化（jsonb，含 tool_calls / tool_call_id 等
   结构字段），读侧 json.loads 还原，保证与原 jsonl 文件时代完全同构；
 - 超长消息外置（P1-13）：content 超过 _BLOB_THRESHOLD_BYTES 时，原文写本地
   blob 文件（.data/{user}/{app}/message_blobs/{session}/{seq}.json），行内
   content 只存 {"payload_ref": <路径>} 桩；读侧 _parse_content 透明还原，
   blob 文件丢失时返回占位 dict（记忆提取/历史展示不中断）；
 - role 列冗余存储（user/assistant/tool），供 SQL 过滤与统计；
-- seq 会话内单调递增：INSERT 前 SELECT MAX(seq) FOR UPDATE 串行化同会话
-  并发写入（InnoDB 在 uk_session_seq 索引上加间隙锁），也是记忆提取水位；
+- seq 会话内单调递增：PG 不允许 SELECT MAX(seq) FOR UPDATE（FOR UPDATE 不能配
+  聚合函数），改用会话级 advisory 事务锁 pg_advisory_xact_lock 串行化同会话并发
+  写入，锁随事务结束自动释放；uk_session_seq 唯一索引作为兜底，也是记忆提取水位；
 - assistant 消息的 tool_calls.arguments 存储时简化为 {"参数名": null}
   （与原 jsonl 行为一致：上下文里保留完整参数，落库只留结构）；
 - content_tokens 为 len//4 估算（本服务无本地 tokenizer）。
@@ -23,14 +24,43 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from sqlalchemy import text
-
-from db.mysql.session import session_maker
+from db.postgres.postgres_client import (
+    memory_execute,
+    memory_fetch,
+    memory_fetchval,
+    memory_transaction,
+)
 from codegenx.ai_service.component import BaseComponent, ComponentType
 from shared import log
 
-# 超长消息外置阈值（字节）：普通消息直存，超限写 blob 防 MySQL 行膨胀
+# 超长消息外置阈值（字节）：普通消息直存，超限写 blob 防 PG 行膨胀
 _BLOB_THRESHOLD_BYTES = 32 * 1024
+
+# 分区补齐幂等标记：首次写入前补齐一次未来月份分区（进程级）
+_partitions_ensured = False
+
+
+async def ensure_partitions(months_ahead: int = 3) -> int:
+    """补齐 message.chat_message 未来月份分区，返回本次新建的分区数。
+
+    供应用启动钩子调用；内部实现为幂等的 PL/pgSQL 函数。
+    """
+    created = await memory_fetchval(
+        "SELECT message.ensure_chat_message_partitions($1)", int(months_ahead)
+    )
+    return int(created or 0)
+
+
+async def _ensure_partitions_once() -> None:
+    """首次写入前补齐一次分区；失败只告警，不阻断写入。"""
+    global _partitions_ensured
+    if _partitions_ensured:
+        return
+    try:
+        await ensure_partitions()
+        _partitions_ensured = True
+    except Exception as exc:  # 建分区失败不应影响正常落库
+        log.warning("chat_message 分区补齐失败（不阻断写入）: {}", exc)
 
 
 def _blob_path(user_id, app_id, session_id: str, seq: int) -> Path:
@@ -65,19 +95,21 @@ class ChatMessageStore(BaseComponent):
         content_json = json.dumps(stored, ensure_ascii=False, default=str)
         content_bytes = len(content_json.encode("utf-8"))
 
-        # P1-13 超长外置：先算 seq 再写 blob（路径含 seq）；写失败回退直存
-        async with session_maker() as session:
-            # MAX(seq) FOR UPDATE：同会话并发追加在 uk_session_seq 上串行化
-            row = (
-                await session.execute(
-                    text(
-                        "SELECT COALESCE(MAX(seq), 0) FROM chat_message "
-                        "WHERE session_id = :s FOR UPDATE"
-                    ),
-                    {"s": session_id},
-                )
-            ).first()
-            seq = int(row[0] or 0) + 1
+        await _ensure_partitions_once()  # 首次写入前补齐未来月份分区
+
+        role = str(message.get("role") or "user")
+        chat_meta = meta if meta else {}
+
+        # P1-13 超长外置：先算 seq 再写 blob（路径含 seq）；写失败回退直存。
+        # 加锁 + 取 MAX(seq) + INSERT 必须在同一连接同一事务内完成：
+        # FOR UPDATE 不能配聚合函数，用会话级 advisory 事务锁串行化同会话追加。
+        async with memory_transaction() as conn:
+            await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", session_id)
+            max_seq = await conn.fetchval(
+                "SELECT COALESCE(MAX(seq), 0) FROM message.chat_message WHERE session_id = $1",
+                session_id,
+            )
+            seq = int(max_seq or 0) + 1
             if content_bytes > _BLOB_THRESHOLD_BYTES:
                 ref_path = _blob_path(user_id, app_id, session_id, seq)
                 try:
@@ -87,35 +119,27 @@ class ChatMessageStore(BaseComponent):
                     content_json = json.dumps({"payload_ref": str(ref_path)}, ensure_ascii=False)
                 except OSError as exc:
                     log.error("超长消息 blob 写盘失败，回退直存: {}", exc)
-            role = str(message.get("role") or "user")
 
-            chat_meta = meta if meta else {}
-            await session.execute(
-                text(
-                    "INSERT INTO chat_message "
-                    "(message_uid, user_id, session_id, app_id, seq, role, "
-                    "content, content_bytes, content_tokens, "
-                    "model, prompt_tokens, completion_tokens, finish_reason) "
-                    "VALUES (:uid, :u, :s, :a, :q, :r, :c, :cb, :ct, "
-                    ":m, :pt, :ct2, :fr)"
-                ),
-                {
-                    "uid": str(uuid.uuid4()),
-                    "u": str(user_id),
-                    "s": session_id,
-                    "a": str(app_id),
-                    "q": seq,
-                    "r": role,
-                    "c": content_json,
-                    "cb": content_bytes,
-                    "ct": content_bytes // 4,  # 估算 token（无本地 tokenizer）
-                    "m": str(chat_meta.get("model") or "") or None,
-                    "pt": int(chat_meta.get("prompt_tokens") or 0) or None,
-                    "ct2": int(chat_meta.get("completion_tokens") or 0) or None,
-                    "fr": str(chat_meta.get("finish_reason") or "") or None,
-                },
+            await conn.execute(
+                "INSERT INTO message.chat_message "
+                "(message_uid, user_id, session_id, app_id, seq, role, "
+                "content, content_bytes, content_tokens, "
+                "model, prompt_tokens, completion_tokens, finish_reason) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13)",
+                str(uuid.uuid4()),
+                str(user_id),
+                session_id,
+                str(app_id),
+                seq,
+                role,
+                content_json,
+                content_bytes,
+                content_bytes // 4,  # 估算 token（无本地 tokenizer）
+                str(chat_meta.get("model") or "") or None,
+                int(chat_meta.get("prompt_tokens") or 0) or None,
+                int(chat_meta.get("completion_tokens") or 0) or None,
+                str(chat_meta.get("finish_reason") or "") or None,
             )
-            await session.commit()
         return seq
 
     # === 读取 ===
@@ -128,15 +152,14 @@ class ChatMessageStore(BaseComponent):
         供记忆提取增量消费；解析失败的行跳过（坏行不阻断水位推进）。
         """
         sql = (
-            "SELECT seq, message_uid, content FROM chat_message "
-            "WHERE session_id = :s AND seq > :a ORDER BY seq ASC"
+            "SELECT seq, message_uid, content FROM message.chat_message "
+            "WHERE session_id = $1 AND seq > $2 ORDER BY seq ASC"
         )
-        params: dict = {"s": session_id, "a": int(after_seq)}
+        args: list = [session_id, int(after_seq)]
         if limit is not None:
-            sql += " LIMIT :l"
-            params["l"] = int(limit)
-        async with session_maker() as session:
-            rows = (await session.execute(text(sql), params)).all()
+            sql += " LIMIT $3"
+            args.append(int(limit))
+        rows = await memory_fetch(sql, *args)
         result: list[tuple[int, dict]] = []
         for seq, message_uid, content in rows:
             message = _parse_content(content)
@@ -150,17 +173,12 @@ class ChatMessageStore(BaseComponent):
         """按 message_uid 批量取原始消息（P2-7 ② 记忆溯源反查；uk_message_uid 点查）。"""
         if not message_uids:
             return []
-        async with session_maker() as session:
-            rows = (
-                await session.execute(
-                    text(
-                        "SELECT message_uid, session_id, seq, role, content, created_at "
-                        "FROM chat_message WHERE message_uid IN :uids "
-                        "ORDER BY session_id, seq ASC LIMIT :l"
-                    ),
-                    {"uids": tuple(message_uids[:500]), "l": int(limit)},
-                )
-            ).all()
+        rows = await memory_fetch(
+            "SELECT message_uid, session_id, seq, role, content, created_at "
+            "FROM message.chat_message WHERE message_uid = ANY($1::text[]) "
+            "ORDER BY session_id, seq ASC LIMIT $2",
+            list(message_uids[:500]), int(limit),
+        )
         result: list[dict] = []
         for uid, sid, seq, role, content, created_at in rows:
             message = _parse_content(content) or {}
@@ -181,20 +199,12 @@ class ChatMessageStore(BaseComponent):
 
         每条消息补 create_time / seq / user_id（与原 jsonl 时代响应字段对齐）。
         """
-        async with session_maker() as session:
-            rows = (
-                (
-                    await session.execute(
-                        text(
-                            "SELECT seq, user_id, content, created_at FROM chat_message "
-                            "WHERE session_id = :s AND user_id = :u "
-                            "ORDER BY seq DESC LIMIT :l"
-                        ),
-                        {"s": session_id, "u": str(user_id), "l": int(limit)},
-                    )
-                )
-                .all()
-            )
+        rows = await memory_fetch(
+            "SELECT seq, user_id, content, created_at FROM message.chat_message "
+            "WHERE session_id = $1 AND user_id = $2 "
+            "ORDER BY seq DESC LIMIT $3",
+            session_id, str(user_id), int(limit),
+        )
         result: list[dict] = []
         for seq, row_user_id, content, created_at in reversed(rows):
             message = _parse_content(content)
@@ -215,28 +225,22 @@ class ChatMessageStore(BaseComponent):
         session_index.json 口径一致）；按会话最后一条 user 消息时间倒序，
         create_time 为会话首条消息时间。
         """
-        # 窗口函数（MySQL 8.0）：rn=1 取每会话首条 user 消息，
-        # last_time 用于"最近活跃"排序；user 消息总是先于本轮其余消息落库，
-        # 故 last user 消息时间即最后一轮起点
+        # 窗口函数：rn=1 取每会话首条 user 消息，last_time 用于"最近活跃"排序；
+        # user 消息总是先于本轮其余消息落库，故 last user 消息时间即最后一轮起点。
+        # content 为 jsonb，->>'content' 直接取正文文本。
         sql = (
             "SELECT session_id, first_message, create_time FROM ("
             " SELECT session_id,"
-            " COALESCE(SUBSTRING(JSON_UNQUOTE(JSON_EXTRACT(content, '$.content')), 1, 50), '')"
-            "   AS first_message,"
+            " COALESCE(SUBSTRING(content->>'content', 1, 50), '') AS first_message,"
             " created_at AS create_time,"
             " ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY seq ASC) AS rn,"
             " MAX(created_at) OVER (PARTITION BY session_id) AS last_time"
-            " FROM chat_message"
-            " WHERE user_id = :u AND app_id = :a AND role = 'user'"
+            " FROM message.chat_message"
+            " WHERE user_id = $1 AND app_id = $2 AND role = 'user'"
             ") t WHERE rn = 1"
-            " ORDER BY last_time DESC LIMIT :l"
+            " ORDER BY last_time DESC LIMIT $3"
         )
-        async with session_maker() as session:
-            rows = (
-                await session.execute(
-                    text(sql), {"u": str(user_id), "a": str(app_id), "l": int(limit)}
-                )
-            ).all()
+        rows = await memory_fetch(sql, str(user_id), str(app_id), int(limit))
         return [
             {
                 "session_id": str(sid or ""),
@@ -254,13 +258,14 @@ class ChatMessageStore(BaseComponent):
 
     async def delete_before(self, cutoff: datetime) -> int:
         """物理删除 cutoff 之前的消息（保留期清理），返回删除行数。"""
-        async with session_maker() as session:
-            cur = await session.execute(
-                text("DELETE FROM chat_message WHERE created_at < :c"),
-                {"c": cutoff},
-            )
-            await session.commit()
-            return int(cur.rowcount or 0)
+        result = await memory_execute(
+            "DELETE FROM message.chat_message WHERE created_at < $1", cutoff
+        )
+        # asyncpg execute 返回命令标签（如 'DELETE 5'），取末段为行数
+        try:
+            return int(str(result).split()[-1])
+        except (ValueError, IndexError):
+            return 0
 
 
 # === 内部 ===
@@ -299,6 +304,7 @@ def _storage_view(message: dict) -> dict:
 def _parse_content(raw) -> dict | None:
     """content 列 JSON → message dict；坏行返回 None 并记日志。
 
+    asyncpg 默认把 jsonb 解码为 str，此处按原行为 json.loads 还原。
     P1-13：payload_ref 桩在此透明还原为原文；blob 文件丢失返回占位
     dict（提取/展示拿到的是空正文而非异常）。
     """

@@ -1,20 +1,19 @@
 ﻿"""
-warm 层检索器 —— 向量召回 → 应用层重排 → 回表（设计方案 v2.1 §5.1/§5.2）。
+warm 层检索器 —— 语义召回 + 关键词兜底 + 应用层重排（设计方案 v2.1 §5.1/§5.2）。
 
-链路（P0-8 瘦 payload 后的重排必须在应用层做）：
-  1. Qdrant search top-N（强制租户 filter，N 明显大于 k）
-  2. MySQL summary LIKE 兜底通道（标识符/表名/路径等 embedding 弱项；
-     正文不进 payload 后，v1 的 Qdrant MatchText 通道由该查询替代）
-  3. 按 agent_memory.id 回表取 summary/content，MySQL 侧再过滤 status=1
-     （Qdrant payload 可能滞后，尽力而为的过滤必须复核）
+链路（PostgreSQL + pgvector 单表，召回即带出整行，无需回表）：
+  1. pgvector 余弦召回 top-N（强制租户过滤，N 明显大于 k）
+  2. pg_trgm 关键词兜底通道（标识符/表名/路径等 embedding 弱项）
+  3. 合并去重（向量分优先）
   4. 应用层重排 final = 0.7×sim_norm + 0.2×decay + 0.1×type_weight
      - sim_norm = (cosine_score + 1) / 2，余弦 [-1,1] 归一到 [0,1]
      - decay = 0.5^(age_days / half_life)，age 按 COALESCE(last_hit_at, created_at)，
        half_life 按类型（memory_type_dict.half_life_d 的代码内镜像）
   5. token 预算窗口截断（warm 是概率性召回，少一条不影响正确性）
-  6. 命中登记（P1-7：Redis Hash 聚合，scheduler 每 5 分钟批量刷回 MySQL）
+  6. 命中登记（P1-7：Redis Hash 聚合，scheduler 每 5 分钟批量刷回）
 
-Qdrant 不可用时向量通道降级为空，关键词通道仍可用（无 embedding 依赖）。
+向量与行同表，不存在「向量库有、库里没有」的幽灵点，因此不再需要回表复检。
+embedding 不可用时向量通道降级为空，关键词通道仍可用（无 embedding 依赖）。
 """
 from __future__ import annotations
 
@@ -28,10 +27,9 @@ from codegenx.ai_service.memory import metrics
 from codegenx.ai_service.memory.models import MemoryEntry, estimate_text_tokens, half_life_of
 from codegenx.ai_service.llm.embedding import get_embedding_client
 from codegenx.ai_service.memory.memory_store import (
-    get_active_by_ids,
+    search_by_vector,
     search_summary_keyword,
 )
-from codegenx.ai_service.memory.vector_store import search_by_vector
 
 KEYWORD_QUERY_MAX_CHARS = 64  # 关键词兜底通道的查询截断长度
 _IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_./-]{3,}")
@@ -91,34 +89,31 @@ async def search_warm(app_id: str, user_id: str, query: str) -> list[MemoryEntry
     if not cfg.enabled or not (query or "").strip():
         return []
 
-    # ── 双路召回 ───────────────────────────────────────────────────────────────
-    semantic: dict[int, float] = {}
-
-    async def _vector_channel() -> None:
-        # embedding 与 Qdrant 分开归因降级（embedding 失败 ≠ 向量库故障）
+    # ── 双路召回（并行；任一路失败降级为空，不影响另一路）──────────────────────
+    async def _vector_channel() -> list[tuple[MemoryEntry, float]]:
+        # embedding 与 PG 分开归因降级（embedding 失败 ≠ 数据库故障）
         try:
             query_vector = await get_embedding_client().embed_query(query)
-        except Exception as exc:  # noqa: BLE001 — embedding 失败降级，不影响关键词通道
+        except Exception as exc:  # noqa: BLE001
             metrics.inc_degrade("embedding")
             log.warning("warm embedding 失败，仅用关键词通道:{}", exc)
-            return
+            return []
         try:
-            for pid, score in await search_by_vector(
+            return await search_by_vector(
                 app_id=app_id,
                 user_id=user_id,
                 query_vector=query_vector,
                 limit=int(getattr(cfg, "recall_top_n", 0) or cfg.top_k or 24),
                 score_threshold=cfg.score_threshold,
-            ):
-                semantic[pid] = score
-        except Exception as exc:  # noqa: BLE001 — 向量库失败降级，不影响关键词通道
-            metrics.inc_degrade("qdrant")
-            log.warning("warm 向量检索失败（Qdrant），仅用关键词通道:{}", exc)
-            return
+            )
+        except Exception as exc:  # noqa: BLE001
+            metrics.inc_degrade("postgres")
+            log.warning("warm 语义检索失败（PostgreSQL），仅用关键词通道:{}", exc)
+            return []
 
     keyword_query = build_keyword_query(query)
 
-    async def _keyword_channel() -> list[MemoryEntry]:
+    async def _keyword_channel() -> list[tuple[MemoryEntry, float]]:
         if not keyword_query:
             return []
         try:
@@ -126,24 +121,18 @@ async def search_warm(app_id: str, user_id: str, query: str) -> list[MemoryEntry
                 app_id=app_id, user_id=user_id,
                 keyword=keyword_query, limit=cfg.keyword_top_k,
             )
-        except Exception as exc:  # noqa: BLE001 — 同上，降级为空
+        except Exception as exc:  # noqa: BLE001 — 降级为空
             log.error("warm 关键词通道失败:{}", exc)
             return []
 
-    # F-1 修复：双通道 gather 并行（原串行——向量通道的 embedding 网络往返完成后
-    # 才开始关键词通道，冷启动轻松超 warm_load_timeout_ms，实测 3/3 全超时零注入）
-    _, keyword_entries = await asyncio.gather(_vector_channel(), _keyword_channel())
+    vector_hits, keyword_hits = await asyncio.gather(_vector_channel(), _keyword_channel())
 
-    # ── 合并去重（向量分优先保留）+ 回表（§5.1：MySQL 侧再过滤 status=1）───────
-    merged: dict[int, tuple[MemoryEntry, float]] = {e.id: (e, _KEYWORD_FALLBACK_SCORE) for e in keyword_entries}
-    vector_ids = [pid for pid in semantic if pid not in merged]
-    if vector_ids:
-        try:
-            for e in await get_active_by_ids(app_id, user_id, vector_ids):
-                if e.id not in merged:
-                    merged[e.id] = (e, semantic.get(e.id, 0.0))
-        except Exception as exc:  # noqa: BLE001
-            log.error("warm 回表失败:{}", exc)
+    # ── 合并去重（向量分优先；关键词命中给保底分参与重排）────────────────────
+    merged: dict[int, tuple[MemoryEntry, float]] = {
+        e.id: (e, _KEYWORD_FALLBACK_SCORE) for e, _ in keyword_hits
+    }
+    for entry, score in vector_hits:
+        merged[entry.id] = (entry, score)
     if not merged:
         return []
 
@@ -172,8 +161,8 @@ async def debug_recall(app_id: str, user_id: str, query: str) -> dict:
     """模拟检索（P2-7 ④ 排查工具，§10.3）：给定 query 输出双路原始召回 + 逐因子明细。
 
     与 search_warm 同构但有三点不同：不登记命中（模拟不污染 hit 统计）、
-    输出中间分（Qdrant 原始分 / sim_norm / decay / type_weight / final_score）、
-    报告「Qdrant 有而 MySQL 无」的幽灵点（对账金矿）。
+    输出中间分（原始相似度 / sim_norm / decay / type_weight / final_score）、
+    标注每条命中来自哪个通道（vector / keyword / both）。
     """
     cfg = config.memory.search
     trace: dict = {
@@ -190,8 +179,8 @@ async def debug_recall(app_id: str, user_id: str, query: str) -> dict:
         trace["aborted"] = "disabled" if not cfg.enabled else "empty_query"
         return trace
 
-    # ── 向量通道（原始分） ──────────────────────────────────────────────────────
-    semantic: dict[int, float] = {}
+    # ── 语义通道（原始相似度） ──────────────────────────────────────────────────
+    vector_hits: list[tuple[MemoryEntry, float]] = []
     try:
         query_vector = await get_embedding_client().embed_query(query)
     except Exception as exc:  # noqa: BLE001 — 模拟工具照实记录降级（与召回主入口同归因）
@@ -200,53 +189,42 @@ async def debug_recall(app_id: str, user_id: str, query: str) -> dict:
         query_vector = None
     if query_vector is not None:
         try:
-            for pid, score in await search_by_vector(
+            vector_hits = await search_by_vector(
                 app_id=app_id,
                 user_id=user_id,
                 query_vector=query_vector,
                 limit=int(getattr(cfg, "recall_top_n", 0) or cfg.top_k or 24),
                 score_threshold=cfg.score_threshold,
-            ):
-                semantic[pid] = score
+            )
         except Exception as exc:  # noqa: BLE001
-            metrics.inc_degrade("qdrant")
-            trace["vector_error"] = f"qdrant {type(exc).__name__}: {exc}"
+            metrics.inc_degrade("postgres")
+            trace["vector_error"] = f"postgres {type(exc).__name__}: {exc}"
     trace["vector_hits"] = [
-        {"agent_memory_id": pid, "raw_score": round(s, 4)}
-        for pid, s in sorted(semantic.items(), key=lambda kv: -kv[1])
+        {"agent_memory_id": e.id, "memory_id": e.memory_id, "raw_score": round(s, 4)}
+        for e, s in sorted(vector_hits, key=lambda kv: -kv[1])
     ]
 
     # ── 关键词通道 ─────────────────────────────────────────────────────────────
     keyword_query = build_keyword_query(query)
     trace["keyword_query"] = keyword_query
-    keyword_entries: list[MemoryEntry] = []
+    keyword_hits: list[tuple[MemoryEntry, float]] = []
     if keyword_query:
         try:
-            keyword_entries = await search_summary_keyword(
+            keyword_hits = await search_summary_keyword(
                 app_id=app_id, user_id=user_id, keyword=keyword_query, limit=cfg.keyword_top_k,
             )
         except Exception as exc:  # noqa: BLE001
             trace["keyword_error"] = f"{type(exc).__name__}: {exc}"
-    trace["keyword_hits"] = [e.memory_id for e in keyword_entries]
+    trace["keyword_hits"] = [e.memory_id for e, _ in keyword_hits]
 
-    # ── 合并去重 + 回表复检 ────────────────────────────────────────────────────
+    # ── 合并去重（同表召回，无需回表复检）──────────────────────────────────────
     merged: dict[int, tuple[MemoryEntry, float]] = {
-        e.id: (e, _KEYWORD_FALLBACK_SCORE) for e in keyword_entries
+        e.id: (e, _KEYWORD_FALLBACK_SCORE) for e, _ in keyword_hits
     }
-    source_of: dict[int, str] = {e.id: "keyword" for e in keyword_entries}
-    vector_ids = [pid for pid in semantic if pid not in merged]
-    if vector_ids:
-        try:
-            found = await get_active_by_ids(app_id, user_id, vector_ids)
-            found_ids = set()
-            for e in found:
-                found_ids.add(e.id)
-                if e.id not in merged:
-                    merged[e.id] = (e, semantic.get(e.id, 0.0))
-                source_of[e.id] = "both" if source_of.get(e.id) == "keyword" else "vector"
-            trace["ghost_point_ids"] = [pid for pid in vector_ids if pid not in found_ids]
-        except Exception as exc:  # noqa: BLE001
-            trace["fetch_error"] = f"{type(exc).__name__}: {exc}"
+    source_of: dict[int, str] = {e.id: "keyword" for e, _ in keyword_hits}
+    for entry, score in vector_hits:
+        merged[entry.id] = (entry, score)
+        source_of[entry.id] = "both" if source_of.get(entry.id) == "keyword" else "vector"
     if not merged:
         trace["candidates"] = []
         return trace

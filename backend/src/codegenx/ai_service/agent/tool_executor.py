@@ -28,10 +28,33 @@ DATA_ANALYSIS_TOOL_NAMES = {
     "describe_csv_stats",
     "guess_analysis_task",
     "execute_postgresql",
+    # PostgreSQL 物理层探查工具
+    "list_tables",
+    "describe_table",
+    "sample_rows",
+    "describe_table_stats",
 }
 
 
 TASK_TOOL_NAMES = {"task_create", "task_update", "task_get", "task_list"}
+
+# 未知工具名疑似 SQL 的判定前缀（模型常把 SQL 误填进 tool name，用于给出针对性纠错提示）
+_SQL_LIKE_PREFIXES = ("select", "with", "insert", "update", "delete", "explain", "show", "desc")
+
+
+def _agent_tool_names(session_state: RuntimeSessionState | None) -> list[str]:
+    """当前智能体可用的工具名，用于未知工具时提示正确候选。
+
+    优先按 config.agents[].tools 白名单；白名单为空（表示全部工具）时回退全局注册表。
+    """
+    try:
+        agent = config.get_agent(getattr(session_state, "agent_name", "") or None)
+        names = [str(n).strip() for n in (agent.tools or []) if str(n).strip()]
+    except Exception:
+        names = []
+    if names:
+        return names
+    return [t.name for t in get_app().tool_registry.tools]
 
 # 长耗时可并行工具（如 dispatch_agent 派发子智能体）：同轮多次调用 = 并行执行
 # （gather + multi_agents.max_parallel 信号量限流）；其余工具保持串行
@@ -239,8 +262,8 @@ class ToolExecutor(BaseComponent):
           blocked 时直接返回 ToolResult(success=False)，不再查找/执行工具
         - AFTER：parallel + 异常隔离（语义落表/persist/sql_trace_end 等），仅观测上报，不影响 result
         - trace 观测直埋：工具执行 with start_span 包裹（op_type=注册表 obs_category）；
-          span 只记执行骨架（谁在何时调了什么、多久、成败），语义字段
-          （sql/recalled_tables 等）由 AFTER_TOOL_CALL 监听器落 telemetry.tool_semantics
+          span 只记执行骨架（谁在何时调了什么、多久、成败），全部工具调用的
+          入参/结果由 AFTER_TOOL_CALL 监听器落 telemetry.tool_semantics
         """
         tool_name = tool_call.get("name")
         tool_input = dict(tool_call.get("arguments", {}) or {})
@@ -287,7 +310,23 @@ class ToolExecutor(BaseComponent):
         tool = next((t for t in get_app().tool_registry.tools if t.name == tool_name), None)
         if not tool:
             log.error(f"Unknown tool called: {tool_name}")
-            return ToolResult(success=False, message=f"未知工具：{tool_name}")
+            # 未知工具也是失败调用：不早退打点，指标里就看不到（LLM 传错工具名是最常见故障）
+            # tool_name 取首行截断，避免把整条 SQL 当 label 撑爆序列基数
+            bad_name = str(tool_name or "").strip().splitlines()[0][:40] or "unknown"
+            feed_tool_call(app_id=app_id, session_id=session_id, tool_name=bad_name,
+                           is_error=True, latency_ms=0.0, error_class="arg_invalid")
+            # 不做静默纠正：直接把"工具名不存在"回给模型，并给出可用工具清单让其重新调用
+            hint = ""
+            if bad_name.lower().startswith(_SQL_LIKE_PREFIXES):
+                hint = "（你把 SQL 语句填到了工具名字段。SQL 应作为 execute_postgresql 的 sql 参数传入。）"
+            return ToolResult(
+                success=False,
+                message=(
+                    f"工具名「{bad_name}」不存在，本次调用未执行。{hint}"
+                    f"可用工具：{', '.join(_agent_tool_names(session_state))}。"
+                    "请按工具定义重新发起正确调用。"
+                ),
+            )
 
         # 2. 工具级熔断：打开期直接快速失败。
         #    在 BEFORE 钩子之前返回，避免 sql_trace_start 等监听器留下半截埋点。
@@ -311,6 +350,9 @@ class ToolExecutor(BaseComponent):
         if before_ctx.action == "blocked":
             await breaker.release()  # 未执行：归还半开探测名额
             log.info("工具 {} 被 BEFORE_TOOL_CALL 钩子阻断: {}", tool_name, before_ctx.message)
+            # 守卫阻断同样是一次失败调用（多为 LLM 传参越界），补打点避免静默
+            feed_tool_call(app_id=app_id, session_id=session_id, tool_name=str(tool_name),
+                           is_error=True, latency_ms=0.0, error_class="arg_invalid")
             return ToolResult(success=False, message=before_ctx.message or "Tool blocked by hook")
 
         # 4. 工具执行（trace 直埋：注册表 obs_category 决定 op_type——tool/retrieval；
@@ -359,8 +401,12 @@ class ToolExecutor(BaseComponent):
         if result.success:
             await breaker.record_success()
         else:
-            # 分类口径：基础设施类失败（超时/执行异常）计入熔断；LLM 入参问题不计
-            counted = bool(error_class) or is_infra_failure(message=result.message)
+            # 分类口径：基础设施类失败（超时/执行异常）计入熔断；
+            # LLM 入参问题(arg_invalid)、子 Agent 未产出(subagent_failed) 不计
+            error_class = error_class or str(getattr(result, "error_class", "") or "")
+            counted = error_class in ("timeout", "execution") or (
+                not error_class and is_infra_failure(message=result.message)
+            )
             error_class = error_class or ("execution" if counted else "arg_invalid")
             await breaker.record_failure(count_as_failure=counted)
 

@@ -7,8 +7,9 @@
 写入时同步的向量检索 + LLM 仲裁链路已整体移除——矛盾检测降级为每日异步
 conflict_detect（P1）。
 
-写入顺序：先 MySQL（真源）成立即写入成功；warm 向量层批量跟进，失败时
-vector_synced_at 保持 NULL，由每日 sync_check 对账补写，不回滚。
+写入顺序：hot 确定性 upsert；warm 先批量生成向量，再「行 + 向量」同语句落库
+（pgvector 单表，无异步补写通道）。embedding 失败整批放弃并由任务重试，
+保证不存在「行存在但检索不到」的不可见记忆。
 """
 from __future__ import annotations
 
@@ -29,10 +30,8 @@ from codegenx.ai_service.memory.models import (
 from codegenx.ai_service.memory.memory_store import (
     append_warm,
     upsert_hot_slot,
-    mark_vector_synced,
 )
 from codegenx.ai_service.llm.embedding import get_embedding_client
-from codegenx.ai_service.memory.vector_store import upsert_points
 
 # LLM 调用签名：v2 写入链路不再使用 LLM（判重已移除），参数保留以对齐
 # scheduler 调用形态，conflict_detect（P1）复用同一约定。
@@ -81,6 +80,7 @@ async def write_memories(
     hot_max = int(getattr(store_cfg, "hot_max_entries", 80) or 80)
 
     written_ids: list[str] = []
+    hot_entries: list[MemoryEntry] = []
     warm_entries: list[MemoryEntry] = []
     for cand in candidates:
         try:
@@ -93,62 +93,61 @@ async def write_memories(
                 entry.task_id = int(task_id)
             if source_agent:  # 偏差①：来源智能体落库（来源审计/多智能体防污染定位）
                 entry.source_agent = str(source_agent)
-            if entry is None:
-                continue
-            if entry.memory_layer == LAYER_HOT:
-                new_id = await upsert_hot_slot(
-                    app_id, user_id, entry,
-                    hot_max_entries=hot_max,
-                    # 达硬上限转投 consolidate（P0-13），DAO 不反向依赖 scheduler
-                    consolidate_enqueuer=_enqueue_consolidate,
-                )
-                if not new_id:
-                    continue  # 硬上限拒绝（已 ERROR 日志 + 转投任务）
-            else:
-                new_id = await append_warm(app_id, user_id, entry)
-                entry.id = new_id
-                warm_entries.append(entry)
-            written_ids.append(entry.memory_id)
+            (hot_entries if entry.memory_layer == LAYER_HOT else warm_entries).append(entry)
         except Exception as exc:  # noqa: BLE001 — 单条失败不阻断整批
             log.error("记忆写入单条失败（跳过）: {} | {}", exc, str(cand)[:120])
 
-    # warm 向量层批量跟进（批量 embedding + 批量 upsert，禁止逐条；失败留 sync_check）
+    # hot 先行：uk_slot 确定性 upsert，幂等（重试不会产生重复）
+    for entry in hot_entries:
+        try:
+            new_id = await upsert_hot_slot(
+                app_id, user_id, entry,
+                hot_max_entries=hot_max,
+                # 达硬上限转投 consolidate（P0-13），DAO 不反向依赖 scheduler
+                consolidate_enqueuer=_enqueue_consolidate,
+            )
+            if not new_id:
+                continue  # 硬上限拒绝（已 ERROR 日志 + 转投任务）
+            written_ids.append(entry.memory_id)
+        except Exception as exc:  # noqa: BLE001
+            log.error("hot 记忆写入失败（跳过）: {} | {}", exc, entry.summary[:60])
+
+    # warm：先批量生成向量，再让「行 + 向量」同一语句落库。
+    # 无异步补写通道 —— embedding 失败整批放弃并抛出，由 memory_task 重试
+    # （避免留下「行存在但检索不到」的不可见记忆，这也是删掉对账子系统的前提）。
     if warm_entries:
         try:
             vectors = await get_embedding_client().embed_texts(
                 [e.inject_text() for e in warm_entries]
             )
-        except Exception as exc:  # noqa: BLE001 — embedding 失败与向量库失败分开归因
+        except Exception as exc:  # noqa: BLE001 — 归因到 embedding 侧
             metrics.inc_degrade("embedding")
-            log.warning("warm 向量 embedding 失败（vector_synced_at 留 NULL，待对账补写）:{}", exc)
-            vectors = None
-        if vectors is not None:
+            log.error("warm 向量生成失败，本批 {} 条放弃写入，任务将重试: {}", len(warm_entries), exc)
+            raise
+        for entry, vec in zip(warm_entries, vectors):
             try:
-                await upsert_points(warm_entries, vectors)
-                await mark_vector_synced([e.id for e in warm_entries])
-            except Exception as exc:  # noqa: BLE001
-                metrics.inc_degrade("qdrant")
-                log.warning("warm 向量批量同步失败（vector_synced_at 留 NULL，待对账补写）:{}", exc)
+                entry.id = await append_warm(app_id, user_id, entry, embedding=vec)
+                written_ids.append(entry.memory_id)
+            except Exception as exc:  # noqa: BLE001 — 单条失败不阻断整批
+                log.error("warm 记忆写入失败（跳过）: {} | {}", exc, entry.summary[:60])
 
     return written_ids
 
 
 def _build_entry(user_id: str, app_id: str, session_id: str, cand: dict) -> MemoryEntry | None:
-    """单条候选 → MemoryEntry；准入校验不过返回 None（拒绝原因打点，§10.1）。"""
+    """单条候选 → MemoryEntry；准入校验不过返回 None（拒绝原因走日志）。"""
     content = str(cand.get("content", "") or "").strip()
     if not content:
-        metrics.inc_write_rejected("empty")
+        log.debug("候选记忆内容为空，拒绝写入")
         return None
     memory_type = str(cand.get("memory_type", "") or "").strip()
     if memory_type not in BUILTIN_MEMORY_TYPES:
-        metrics.inc_write_rejected("type")
         log.warning("未知记忆类型，拒绝写入（宁缺毋滥）: {}", memory_type)
         return None
 
     hit = match_sensitive(content)
     if hit:
         # §10.1 memory.write.rejected_sensitive
-        metrics.inc_write_rejected("sensitive")
         log.warning("候选记忆含敏感信息({}),拦截: {}", hit, content[:40])
         return None
 
@@ -158,7 +157,6 @@ def _build_entry(user_id: str, app_id: str, session_id: str, cand: dict) -> Memo
 
     # §4.3：模型推断不得进 hot 层（hot 只收用户明说/人工录入）
     if layer == LAYER_HOT and source_type == SOURCE_INFERRED:
-        metrics.inc_write_rejected("inferred_hot")
         log.warning("模型推断的 hot 类候选被拒（推断不得进 hot 层）: {}", memory_type)
         return None
 

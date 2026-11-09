@@ -34,7 +34,7 @@
 │  │ Builder │  │ 压缩     │  │ 三级      │  │ 技能   │ │
 │  └─────────┘  └──────────┘  └───────────┘  └────────┘ │
 │                                                        │
-│  基础设施：MySQL · Redis · Qdrant · Postgres · Prometheus│
+│  基础设施：MySQL · Redis · Postgres(pgvector) · Prometheus     │
 └───────────────────────────────────────────────────────┘
 ```
 

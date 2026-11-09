@@ -92,6 +92,33 @@ async def query(
     except asyncio.TimeoutError:
         log.warning("PG 查询超时 ({}s): {}", timeout_seconds, sql[:120])
         raise
+async def get_table_rows_estimate(
+    db_name: str, table_name: str, schema: str = "",
+) -> int:
+    """估算表行数（pg_class.reltuples，ANALYZE 后更准，否则是历史值）。
+
+    schema 为空时不限定；table_name 必须为真实表名（不支持引号标识符）。
+    """
+    _IDENT_RE.match(table_name) or _IDENT_RE.match(table_name)  # 仅触发校验
+    pool = await _get_pool(db_name)
+    # reltuples 在 ANALYZE 后可靠；未经分析时返回 0 也能接受（上层标注"未知"）
+    sql = (
+        "SELECT reltuples::bigint AS rows "
+        "FROM pg_class c "
+        "JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE c.relname = $1"
+    )
+    args: list[Any] = [table_name]
+    if schema:
+        sql += " AND n.nspname = $2"
+        args.append(schema)
+    sql += " LIMIT 1"
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, *args)
+        if rows:
+            return int(rows[0]["rows"] or 0)
+        return 0
+
 
 
 async def close_pools() -> None:
