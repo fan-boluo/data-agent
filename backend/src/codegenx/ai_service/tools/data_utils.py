@@ -1,40 +1,31 @@
 """
 通用数据分析辅助工具
 
-- guess_analysis_task: 根据数据结构推断分析方向
-- get_table_relationships: 表间关系发现(适用于mysql数据库,已不再注册使用)
+- guess_analysis_task: 根据数据结构推断分析方向（当前数据集 = PostgreSQL 公共库 / CSV）
 """
 
 import asyncio
-from collections import defaultdict
-from difflib import SequenceMatcher
+import re
 from typing import Any
 
 from codegenx.ai_service.tools.base import BaseTool, ToolResult, ToolSession
 from shared import log
 
+# 标识符安全校验：拼进 information_schema 信息查询前的兜底
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
 
-# ═══════════════════════════════════════════════════════════
-# 别名常量——避免硬依赖 data_mysql 模块
-# ═══════════════════════════════════════════════════════════
-
-def _get_mysql_manager():
-    """延迟导入，避免循环依赖；F-4 起共享 mysql_manager 进程级单例（配置来自 config.json）。"""
-    from codegenx.ai_service.agent.db.mysql_manager import get_mysql_manager
-    return get_mysql_manager()
-
-
-# 列类型优先级 SQL（复用 data_mysql 中的逻辑）
-_COL_TYPE_SQL = (
-    "SELECT COLUMN_NAME, DATA_TYPE "
-    "FROM information_schema.COLUMNS "
-    "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s "
-    "ORDER BY ORDINAL_POSITION"
+# 列类型查询（PostgreSQL；schema 为空时排除系统 schema）
+_COLUMNS_SQL = (
+    "SELECT column_name, data_type FROM information_schema.columns "
+    "WHERE table_name = '{table}' {schema_filter} "
+    "ORDER BY ordinal_position"
 )
 
-_TABLE_LIST_SQL = (
-    "SELECT TABLE_NAME FROM information_schema.TABLES "
-    "WHERE TABLE_SCHEMA = %s AND TABLE_TYPE = 'BASE TABLE'"
+# schema 下表数量（多表提示用）
+_TABLE_COUNT_SQL = (
+    "SELECT count(*) AS n FROM pg_catalog.pg_class c "
+    "JOIN pg_catalog.pg_namespace ns ON ns.oid = c.relnamespace "
+    "WHERE c.relkind = 'r' AND ns.nspname = '{schema}'"
 )
 
 
@@ -125,7 +116,7 @@ class GuessAnalysisTaskTool(BaseTool):
         return (
             "根据数据表/CSV 的结构自动推断可能的分析方向（3-5 条建议）。"
             "在用户不太清楚要从什么角度分析时使用，提供分析思路启发。"
-            "至少需要提供 (db_name + table_name) 或 file_path 之一。"
+            "数据库表只写 table_name（可写 schema.table，dataset 取当前会话），或给 file_path 指向 CSV。"
         )
 
     @property
@@ -133,13 +124,9 @@ class GuessAnalysisTaskTool(BaseTool):
         return {
             "type": "object",
             "properties": {
-                "db_name": {
-                    "type": "string",
-                    "description": "数据库名称（MySQL 数据源）",
-                },
                 "table_name": {
                     "type": "string",
-                    "description": "表名",
+                    "description": "表名，可写 schema.table；不填 schema 用当前数据集默认 schema",
                 },
                 "file_path": {
                     "type": "string",
@@ -163,29 +150,59 @@ class GuessAnalysisTaskTool(BaseTool):
     async def _do_execute(
         self, params: dict, signal: asyncio.Event | None = None,
     ) -> ToolResult:
-        db_name = params.get("db_name") or (await ToolSession.load(params)).db_name or None
-        table_name = params.get("table_name")
+        table_ref = str(params.get("table_name") or "").strip()
         file_path = params.get("file_path")
 
-        if not db_name and not file_path:
+        if not table_ref and not file_path:
             return ToolResult(
                 success=False,
-                message="需要提供 db_name 或 file_path",
+                message="需要提供 table_name 或 file_path",
             )
 
         n_tables = 1
         columns: list[tuple[str, str]] = []
         n_rows = 0
 
-        if db_name and table_name:
-            mgr = _get_mysql_manager()
+        if table_ref:
+            # 表引用解析：schema.table / table（schema 缺省用当前数据集）
+            parts = [p for p in table_ref.split(".") if p]
+            if len(parts) == 2:
+                schema, table = parts
+            elif len(parts) == 1:
+                schema, table = "", parts[0]
+            else:
+                return ToolResult(success=False, message=f"表名不合法: {table_ref}")
+            if not _IDENT_RE.match(table) or (schema and not _IDENT_RE.match(schema)):
+                return ToolResult(success=False, message=f"表名或 schema 含非法字符: {table_ref}")
+
+            sess = await ToolSession.load(params)
+            db_name = str(params.get("db_name") or sess.db_name).strip()
+            if not db_name:
+                return ToolResult(
+                    success=False,
+                    message="未选择数据集，请先让用户选择要分析的数据集",
+                )
+            schema = schema or str(params.get("db_schema") or sess.db_schema).strip()
+            if schema and not _IDENT_RE.match(schema):
+                return ToolResult(success=False, message=f"schema 含非法字符: {schema}")
+
+            from codegenx.ai_service.agent.db import postgres_manager
+            # 只查信息架构（列类型 + 行数估算 + 表数），走只读连接池
+            schema_filter = (
+                f"AND table_schema = '{schema}'" if schema
+                else "AND table_schema NOT IN ('pg_catalog', 'information_schema')"
+            )
             try:
-                col_rows = await mgr.query(db_name, _COL_TYPE_SQL, (db_name, table_name))
-                columns = [(r["COLUMN_NAME"], r["DATA_TYPE"]) for r in col_rows]
-                n_rows = await mgr.get_table_rows_estimate(db_name, table_name)
-                # 表数
-                table_rows = await mgr.query(db_name, _TABLE_LIST_SQL, (db_name,))
-                n_tables = len(table_rows)
+                col_rows = await postgres_manager.query(
+                    db_name, _COLUMNS_SQL.format(table=table, schema_filter=schema_filter), schema=schema,
+                )
+                columns = [(r["column_name"], r["data_type"]) for r in col_rows]
+                n_rows = await postgres_manager.get_table_rows_estimate(db_name, table, schema=schema)
+                if schema:
+                    cnt_rows = await postgres_manager.query(
+                        db_name, _TABLE_COUNT_SQL.format(schema=schema), schema=schema,
+                    )
+                    n_tables = int(cnt_rows[0]["n"]) if cnt_rows else 1
             except Exception as exc:
                 return ToolResult(success=False, message=f"查询表信息失败: {exc}")
 
@@ -217,185 +234,3 @@ class GuessAnalysisTaskTool(BaseTool):
             lines.append(f"{i}. {s}")
 
         return ToolResult(success=True, data="\n".join(lines), render=f"分析建议: {len(columns)} 列, {n_rows} 行")
-
-
-# ═══════════════════════════════════════════════════════════
-# 9. get_table_relationships
-# ═══════════════════════════════════════════════════════════
-
-# 查询显式外键
-_FK_SQL = (
-    "SELECT "
-    "  COLUMN_NAME AS fk_column, "
-    "  REFERENCED_TABLE_NAME AS ref_table, "
-    "  REFERENCED_COLUMN_NAME AS ref_column, "
-    "  CONSTRAINT_NAME AS constraint_name "
-    "FROM information_schema.KEY_COLUMN_USAGE "
-    "WHERE TABLE_SCHEMA = %s "
-    "  AND REFERENCED_TABLE_SCHEMA = %s "
-    "  AND REFERENCED_TABLE_NAME IS NOT NULL"
-)
-
-
-def _infer_relationships(
-    all_tables: dict[str, list[str]],
-    min_similarity: float = 0.7,
-) -> list[dict]:
-    """根据列名相似度推断可能的关联关系。"""
-    relations = []
-    table_names = list(all_tables.keys())
-
-    # 生成所有列到表的反向索引（只取含 _id 或 id 的列）
-    col_index: dict[str, list[tuple[str, str]]] = defaultdict(list)
-    for tbl, cols in all_tables.items():
-        for col in cols:
-            col_lower = col.lower()
-            if col_lower.endswith("_id") or col_lower == "id":
-                col_index[col_lower].append((tbl, col))
-
-    for tbl_a, cols_a in all_tables.items():
-        for col_a in cols_a:
-            col_a_lower = col_a.lower()
-            if not (col_a_lower.endswith("_id") or col_a_lower == "id"):
-                continue
-
-            # 找匹配的 "id" 列
-            # user_id → id in another table
-            for tbl_b, cols_b in all_tables.items():
-                if tbl_b == tbl_a:
-                    continue
-                for col_b in cols_b:
-                    col_b_lower = col_b.lower()
-                    # 匹配规则: a.user_id → b.id
-                    if col_a_lower == "id":
-                        # 检查 b 中是否有 xxx_id 指回 a
-                        ref_col = f"{tbl_a.lower()}_id"
-                        if col_b_lower == ref_col:
-                            relations.append({
-                                "from_table": tbl_b,
-                                "from_column": col_b,
-                                "to_table": tbl_a,
-                                "to_column": col_a,
-                                "type": "inferred",
-                                "confidence": "medium",
-                            })
-                    elif col_b_lower == "id":
-                        # a.xxx_id → b.id
-                        # 检查列名去掉 _id 后缀后是否匹配另一个表名
-                        prefix = col_a_lower[:-3]  # 去掉 _id
-                        if prefix == tbl_b.lower() or _similar(prefix, tbl_b.lower()) > min_similarity:
-                            relations.append({
-                                "from_table": tbl_a,
-                                "from_column": col_a,
-                                "to_table": tbl_b,
-                                "to_column": col_b,
-                                "type": "inferred",
-                                "confidence": "high" if prefix == tbl_b.lower() else "medium",
-                            })
-
-    return relations
-
-
-def _similar(a: str, b: str) -> float:
-    return SequenceMatcher(None, a, b).ratio()
-
-
-class GetTableRelationshipsTool:
-
-    @property
-    def name(self) -> str:
-        return "get_table_relationships"
-
-    @property
-    def label(self) -> str:
-        return "data_analysis"
-
-    @property
-    def description(self) -> str:
-        return (
-            "返回数据库中表之间的外键关系（显式）和基于列名推断的潜在关联关系。"
-            "用于辅助编写多表 JOIN 的 SQL。"
-        )
-
-    @property
-    def parameters(self) -> dict[str, Any]:
-        return {
-            "type": "object",
-            "properties": {
-                "db_name": {
-                    "type": "string",
-                    "description": "数据库名称",
-                },
-            },
-            "required": ["db_name"],
-        }
-
-    async def execute(
-        self, params: dict, signal: asyncio.Event | None = None,
-    ) -> ToolResult:
-        try:
-            return await self._do_execute(params, signal)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            log.warning("get_table_relationships 执行异常: {}", exc)
-            return ToolResult(success=False, message=f"获取表关系失败: {exc}")
-
-    async def _do_execute(
-        self, params: dict, signal: asyncio.Event | None = None,
-    ) -> ToolResult:
-        db_name = params["db_name"]
-        mgr = _get_mysql_manager()
-
-        # 显式外键
-        fk_rows = await mgr.query(db_name, _FK_SQL, (db_name, db_name))
-
-        # 获取所有表和它们的列
-        table_rows = await mgr.query(db_name, _TABLE_LIST_SQL, (db_name,))
-        all_tables: dict[str, list[str]] = {}
-        for tr in table_rows:
-            tname = tr["TABLE_NAME"]
-            try:
-                cols = await mgr.query(
-                    db_name,
-                    "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
-                    "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s",
-                    (db_name, tname),
-                )
-                all_tables[tname] = [c["COLUMN_NAME"] for c in cols]
-            except Exception:
-                all_tables[tname] = []
-
-        # 推断关系
-        inferred = _infer_relationships(all_tables)
-
-        lines = [f"数据库 {db_name} 表关系:"]
-
-        if fk_rows:
-            lines.append("")
-            lines.append("── 显式外键 ──")
-            for fk in fk_rows:
-                lines.append(
-                    f"  {fk['fk_column']} → {fk['ref_table']}.{fk['ref_column']} "
-                    f"({fk['constraint_name']})"
-                )
-
-        if inferred:
-            lines.append("")
-            lines.append("── 推断关系（基于列名）──")
-            seen = set()
-            for rel in inferred:
-                key = (rel["from_table"], rel["to_table"])
-                if key not in seen:
-                    seen.add(key)
-                    lines.append(
-                        f"  {rel['from_table']}.{rel['from_column']} "
-                        f"→ {rel['to_table']}.{rel['to_column']} "
-                        f"[{rel['confidence']} confidence]"
-                    )
-
-        if not fk_rows and not inferred:
-            lines.append("")
-            lines.append("未发现显式外键或可推断的关联关系")
-
-        return ToolResult(success=True, data="\n".join(lines), render=f"表关系查找: {db_name}")
