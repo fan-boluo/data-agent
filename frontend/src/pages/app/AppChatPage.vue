@@ -420,6 +420,27 @@
         </div>
       </div>
 
+      <!-- HITL 审批条：高风险工具执行前贴在输入框上方确认（同一条 SSE 流保持挂起） -->
+      <div v-if="pendingApproval" class="approval-panel">
+        <div class="approval-head">
+          <span class="approval-risk">
+            <ExclamationCircleOutlined />
+            需要确认 · 风险等级 {{ pendingApproval.level }}
+            <span v-if="pendingApproval.reasons.length">（{{ pendingApproval.reasons.join('、') }}）</span>
+          </span>
+          <code class="approval-tool">{{ pendingApproval.toolName }}</code>
+        </div>
+        <div v-if="pendingApproval.title" class="approval-row">{{ pendingApproval.title }}</div>
+        <pre v-if="pendingApproval.sql" class="approval-sql">{{ pendingApproval.sql }}</pre>
+        <div class="approval-foot">
+          <span class="approval-tip">超时（{{ pendingApproval.timeoutSeconds }}s）未处理将自动拒绝</span>
+          <div class="approval-actions">
+            <a-button size="small" danger :loading="approvalSubmitting" @click="resolveApproval(false)">拒绝</a-button>
+            <a-button size="small" type="primary" :loading="approvalSubmitting" @click="resolveApproval(true)">允许执行</a-button>
+          </div>
+        </div>
+      </div>
+
       <!-- 输入框（跨 Tab 共享） -->
       <div class="input-container" :style="{ height: inputHeight + 'px' }">
         <div class="resizer-horizontal input-resizer" @mousedown="onResizeStart('input', $event)" />
@@ -522,6 +543,7 @@ import {
   DeleteOutlined,
   DownOutlined,
   EditOutlined,
+  ExclamationCircleOutlined,
   FileAddOutlined,
   FileTextOutlined,
   FolderAddOutlined,
@@ -1577,7 +1599,48 @@ const applyMessageChunk = (chunk: unknown) => {
   scrollToBottom()
 }
 
+// ----------- HITL 审批（高风险工具执行前挂起）-----------
+interface PendingApproval {
+  approvalId: string
+  toolName: string
+  level: string
+  reasons: string[]
+  title: string
+  sql: string
+  timeoutSeconds: number
+}
+const pendingApproval = ref<PendingApproval | null>(null)
+const approvalSubmitting = ref(false)
+
+// 提交审批结果：允许/拒绝后后端 future 解除挂起，同一条 SSE 流继续输出
+const resolveApproval = async (approved: boolean) => {
+  const item = pendingApproval.value
+  if (!item || approvalSubmitting.value) return
+  approvalSubmitting.value = true
+  try {
+    const baseURL = request.defaults.baseURL || API_BASE_URL
+    const res = await fetch(`${baseURL}/api/chat/approval`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+      body: JSON.stringify({
+        appId: String(appId.value),
+        approvalId: item.approvalId,
+        approved,
+        reason: approved ? '用户允许执行' : '用户拒绝执行',
+      }),
+    })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    message.success(approved ? '已允许执行' : '已拒绝执行')
+    pendingApproval.value = null
+  } catch (error: any) {
+    message.error('审批提交失败：' + (error.message || '未知错误'))
+  } finally {
+    approvalSubmitting.value = false
+  }
+}
+
 const finishStream = () => {
+  pendingApproval.value = null
   isGenerating.value = false
   isStoppingGeneration.value = false
   stopRequested.value = false
@@ -1709,6 +1772,21 @@ const failAllRunningToolSteps = () => {
 const handleStreamEvent = (event: { event_type: string; data: any; state?: string }) => {
   const eventType = event.event_type
   const eventData = event.data
+
+  // ---- HITL：高风险工具执行前挂起，弹窗等待人工确认（同一 SSE 流保持连接）----
+  if (eventType === 'ApprovalRequired') {
+    pendingApproval.value = {
+      approvalId: String(eventData?.approval_id || ''),
+      toolName: String(eventData?.tool_name || '工具调用'),
+      level: String(eventData?.level || 'high'),
+      reasons: Array.isArray(eventData?.reasons) ? eventData.reasons : [],
+      title: String(eventData?.title || ''),
+      sql: String(eventData?.sql || ''),
+      timeoutSeconds: Number(eventData?.timeout_seconds || 300),
+    }
+    scrollToBottom()
+    return
+  }
 
   // ---- 分析链路专用事件（推右栏 trace，不混入 messages）----
   if (eventType === 'SQL_Start') {
@@ -3114,6 +3192,33 @@ onBeforeUnmount(() => {
 
 /* 让 messages-container 占满对话内容区 */
 .messages-container { flex: 1; min-height: 0; overflow-y: auto; }
+
+/* HITL 审批条：贴在输入框上方，不遮挡对话内容 */
+.approval-panel {
+  flex-shrink: 0;
+  margin: 0 12px 8px;
+  padding: 10px 12px;
+  background: #fff7f0;
+  border: 1px solid #ffbb96;
+  border-radius: var(--radius-card);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+.approval-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.approval-risk { color: #d4380d; font-size: 13px; font-weight: 500; }
+.approval-tool {
+  padding: 1px 6px; border-radius: 4px;
+  background: #fff; border: 1px solid #ffd8bf;
+  font-size: 12px; color: #ad4e00;
+}
+.approval-row { margin-bottom: 6px; font-size: 13px; color: #595959; }
+.approval-sql {
+  max-height: 140px; overflow: auto; margin: 6px 0; padding: 8px;
+  background: #fff; border: 1px solid #f0f0f0; border-radius: 6px;
+  font-size: 12px; white-space: pre-wrap; word-break: break-all;
+}
+.approval-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.approval-tip { font-size: 12px; color: #8c8c8c; }
+.approval-actions { display: flex; gap: 8px; }
 
 @media (max-width: 768px) {
   #appChatPage.ide-layout {

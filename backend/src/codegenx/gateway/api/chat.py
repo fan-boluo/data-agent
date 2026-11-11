@@ -16,6 +16,7 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from codegenx.ai_service.api.router import generate_code_stream, stop_code_stream
+from codegenx.ai_service.agent.hitl import get_approval_gate
 from codegenx.app_service.services.access import require_participant_by_id
 from codegenx.gateway.middleware.auth import require_login
 from codegenx.gateway.middleware.jwt_auth import JWTUser
@@ -24,6 +25,9 @@ from db.mysql.session import get_db_session
 from db.redis.redis_client import get_redis_client
 from codegenx.ai_service.schema.ai_schema import UserAIRequest, AiServiceStopRequest
 from shared.constants import PUBLIC_SCHEMAS
+from shared.exceptions.business_exception import BusinessException
+from shared.exceptions.error_code import ErrorCode
+from shared.utils.result_utils import success
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -57,6 +61,33 @@ async def chat_to_gen_code_post(
 
     request = UserAIRequest.model_validate(payload)
     return await generate_code_stream(request)
+
+
+@router.post("/approval")
+async def chat_tool_approval(
+    payload: dict[str, Any],
+    login_user: JWTUser = Depends(require_login),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """HITL 闸门审批：approve / reject / approve_with_edit（改参数后执行）。"""
+    app_id = str(payload.get("appId") or "").strip()
+    await require_participant_by_id(db, app_id, login_user)
+
+    approval_id = str(payload.get("approvalId") or "").strip()
+    if not approval_id:
+        raise BusinessException(ErrorCode.PARAMS_ERROR, "approvalId 不能为空")
+    edited = payload.get("editedArguments")
+    approved = bool(payload.get("approved"))
+    resolved = get_approval_gate().resolve(
+        approval_id,
+        approved=approved,
+        reason=str(payload.get("reason") or ""),
+        edited_arguments=edited if isinstance(edited, dict) and edited else None,
+    )
+    if not resolved:
+        # 已超时自动拒绝 / 已被处理 / id 不存在：前端提示刷新即可
+        raise BusinessException(ErrorCode.NOT_FOUND_ERROR, "审批项不存在或已处理")
+    return success({"approvalId": approval_id, "approved": approved})
 
 
 @router.post("/stop")

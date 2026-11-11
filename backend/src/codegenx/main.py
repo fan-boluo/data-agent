@@ -18,6 +18,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 
 from codegenx.ai_service.api.memory_router import memory_admin_router
+from codegenx.ai_service.api.eval_router import eval_router
 from codegenx.app_service.router import router as app_router
 from codegenx.gateway.api.blacklist import router as blacklist_router
 from codegenx.gateway.api.chat import router as chat_router
@@ -150,6 +151,7 @@ def create_app() -> FastAPI:
     app.include_router(blacklist_router, prefix=settings.app_base_path)
     app.include_router(monitor_router, prefix=settings.app_base_path)
     app.include_router(memory_admin_router, prefix=settings.app_base_path)
+    app.include_router(eval_router, prefix=settings.app_base_path)
     # Prometheus 指标无 /api 前缀
     app.include_router(metrics_router)
 

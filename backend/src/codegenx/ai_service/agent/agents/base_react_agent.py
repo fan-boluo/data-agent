@@ -14,7 +14,7 @@ from codegenx.ai_service.schema.ai_schema import UserAIRequest
 from codegenx.ai_service.utils.config import AgentConfig
 from codegenx.ai_service.system_app import get_app
 from codegenx.ai_service.trace import report_context_usage, start_span
-from codegenx.ai_service.agent.tool_handler import get_tool_registry
+from codegenx.ai_service.agent.tools.tool_handler import get_tool_registry
 from shared import log
 from codegenx.ai_service.agent.agents.agent import Agent, AgentMessage
 from codegenx.ai_service.context.common_context import CommonContext

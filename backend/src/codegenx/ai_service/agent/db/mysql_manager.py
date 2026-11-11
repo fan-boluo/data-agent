@@ -158,8 +158,7 @@ class MysqlManager:
             self._pool = None
 
 
-# ── 进程级单例（F-4：连接配置接入 config.json tools.mysql，原两处工具模块各自
-#    new MysqlManager() 只会用硬编码默认值 readonly/空密码，凭据无法配置） ──────────
+# ── 进程级单例（连接参数来自 .env，经 shared.settings 读取） ──────────
 _manager: MysqlManager | None = None
 
 

@@ -19,9 +19,9 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from codegenx.ai_service.tools.base import BaseTool, ToolResult
+from codegenx.ai_service.tools.base import BaseTool, ToolResult, ToolSession
 from shared import log
-from shared.constants import DATA_ROOT_DIR, PYTHON_ENV, get_code_dir
+from shared.constants import DATA_ROOT_DIR, PYTHON_ENV
 
 # 代码执行超时（秒）
 EXEC_TIMEOUT_SECONDS = 60
@@ -34,7 +34,7 @@ CSV_DIR_PLACEHOLDER = "__CSV_DIR__"
 class RunPythonTool(BaseTool):
     """pandas 分析代码执行工具。
 
-    user_id/app_id 由 ToolExecutor 注入，用于定位当前用户项目 code_dir；
+    归属由 session_id 解析，用于定位当前用户项目 code_dir；
     占位符按环境替换（dev=宿主机路径，docker=容器内路径）后执行。
     """
 
@@ -86,10 +86,9 @@ class RunPythonTool(BaseTool):
         if not code:
             return ToolResult(success=False, message="code 为空，无法执行")
 
-        # ── 解析项目目录并替换占位符（user_id/app_id 由 ToolExecutor 注入） ──
-        user_id = str(params.get("user_id") or "main")
-        app_id = str(params.get("app_id") or "main")
-        code_dir = get_code_dir(user_id, app_id).resolve()
+        # ── 解析项目目录并替换占位符（会话归属由 session_id 解析） ──
+        sess = await ToolSession.load(params)
+        code_dir = sess.workspace().resolve()
         if not code_dir.exists():
             return ToolResult(success=False, message=f"项目目录不存在: {code_dir}")
 

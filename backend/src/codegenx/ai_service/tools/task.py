@@ -7,7 +7,7 @@ Four tools that give the LLM full CRUD access to the persistent task board:
   task_list    — list all (or filtered) tasks on the board
 
 工具内部经 get_app().tasks（全局 TaskBoardService，ids 作方法参数）。
-任务看板按 request 维度存储：ids 含 request_id（ToolExecutor 注入），
+任务看板按 request 维度存储：ids 中的归属信息由工具凭 session_id 自行解析，
 task_id 为 request 内局部 id，跨请求互不可见。
 """
 from __future__ import annotations
@@ -16,26 +16,23 @@ import asyncio
 import json
 from typing import Any
 
-from codegenx.ai_service.tools.base import BaseTool, ToolResult
+from codegenx.ai_service.tools.base import BaseTool, ToolResult, ToolSession
 from shared import log
 
 
-def _task_service(params: dict) -> Any | None:
-    """取全局任务看板服务；ids 缺失返回 None（由调用方给出错误提示）。"""
+async def _scope(params: dict) -> tuple[Any | None, dict]:
+    """取全局任务看板服务与会话 ids；无会话时服务为 None（由调用方提示）。"""
+    sess = await ToolSession.load(params)
+    if not sess.session_id:
+        return None, {}
     from codegenx.ai_service.system_app import get_app
 
-    if not str(params.get("session_id", "") or ""):
-        return None
-    return get_app().tasks
-
-
-def _ids(params: dict) -> dict:
     # request_id 一起下传：任务按 request 单文件隔离，task_id 为 request 内局部 id
-    return {
-        "user_id": str(params.get("user_id", "") or ""),
-        "app_id": str(params.get("app_id", "") or ""),
-        "session_id": str(params.get("session_id", "") or ""),
-        "request_id": str(params.get("request_id", "") or ""),
+    return get_app().tasks, {
+        "user_id": sess.user_id,
+        "app_id": sess.app_id,
+        "session_id": sess.session_id,
+        "request_id": sess.request_id,
     }
 
 
@@ -79,7 +76,7 @@ class TaskCreateTool(BaseTool):
         }
 
     async def execute(self, params: dict, signal: asyncio.Event | None = None) -> ToolResult:
-        tasks = _task_service(params)
+        tasks, ids = await _scope(params)
         if tasks is None:
             return ToolResult(success=False, data="Task board is not available (missing session ids).")
         try:
@@ -87,7 +84,7 @@ class TaskCreateTool(BaseTool):
                 subject=str(params.get("subject", "")),
                 description=str(params.get("description", "") or ""),
                 depends_on=list(params.get("depends_on") or []),
-                **_ids(params),
+                **ids,
             )
             return ToolResult(
                 success=True,
@@ -135,7 +132,7 @@ class TaskUpdateTool(BaseTool):
         }
 
     async def execute(self, params: dict, signal: asyncio.Event | None = None) -> ToolResult:
-        tasks = _task_service(params)
+        tasks, ids = await _scope(params)
         if tasks is None:
             return ToolResult(success=False, data="Task board is not available (missing session ids).")
         task_id = params.get("task_id")
@@ -148,7 +145,7 @@ class TaskUpdateTool(BaseTool):
                 executor_agent=params.get("executor_agent"),
                 subject=params.get("subject"),
                 description=params.get("description"),
-                **_ids(params),
+                **ids,
             )
             return ToolResult(
                 success=True,
@@ -184,14 +181,14 @@ class TaskGetTool(BaseTool):
         }
 
     async def execute(self, params: dict, signal: asyncio.Event | None = None) -> ToolResult:
-        tasks = _task_service(params)
+        tasks, ids = await _scope(params)
         if tasks is None:
             return ToolResult(success=False, data="Task board is not available (missing session ids).")
         task_id = params.get("task_id")
         if task_id is None:
             return ToolResult(success=False, data="task_id is required.")
         try:
-            task = tasks.get(int(task_id), **_ids(params))
+            task = tasks.get(int(task_id), **ids)
             if task is None:
                 return ToolResult(success=False, data=f"Task {task_id} not found.", render=f"任务 #{task_id} 不存在")
             return ToolResult(success=True, data=task.model_dump_json(), render=f"获取任务: {task.subject}")
@@ -230,13 +227,13 @@ class TaskListTool(BaseTool):
         }
 
     async def execute(self, params: dict, signal: asyncio.Event | None = None) -> ToolResult:
-        tasks = _task_service(params)
+        tasks, ids = await _scope(params)
         if tasks is None:
             return ToolResult(success=False, data="Task board is not available (missing session ids).")
         try:
             status_filter = params.get("status")
-            board_tasks = tasks.list_all(status=status_filter, **_ids(params))
-            board = tasks.get_board(**_ids(params))
+            board_tasks = tasks.list_all(status=status_filter, **ids)
+            board = tasks.get_board(**ids)
             return ToolResult(
                 success=True,
                 data=str({"tasks": [t.model_dump(mode="json") for t in board_tasks], "board": board}),

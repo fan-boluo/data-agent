@@ -1,7 +1,7 @@
 ﻿"""
 PostgreSQL 数据分析工具集。
 
-db_name / db_schema 由 ToolExecutor 从 session_state.current_db 注入
+db_name / db_schema 由工具凭 session_id 解析当前数据集（不再由执行器注入）
 （current_db 格式 "datasource.schema"，如 business.dvdrental）。
 
 工具分工：
@@ -24,7 +24,7 @@ import re
 from typing import Any
 
 from codegenx.ai_service.utils.dbutils import check_sql_safety
-from codegenx.ai_service.tools.base import BaseTool, ToolResult
+from codegenx.ai_service.tools.base import BaseTool, ToolResult, ToolSession
 from codegenx.ai_service.utils.dbutils import format_rows
 from shared import log, settings
 
@@ -82,13 +82,14 @@ class ExecutePostgresqlTool(BaseTool):
         sql = str(params.get("sql") or "").strip()
         if not sql:
             return ToolResult(success=False, message="SQL 为空，无法执行")
-        db_name = str(params.get("db_name") or "").strip()
+        sess = await ToolSession.load(params)
+        db_name = str(params.get("db_name") or sess.db_name).strip()
         if not db_name:
             return ToolResult(
                 success=False,
                 message="未选择数据集，无法执行 SQL；请先让用户选择要分析的数据集",
             )
-        schema = str(params.get("db_schema") or "").strip()
+        schema = str(params.get("db_schema") or sess.db_schema).strip()
 
         # ── 统一只读守卫（复用 dbutils 安全检查） ──
         check_sql_safety(sql)
@@ -217,10 +218,11 @@ class ListTablesTool(BaseTool):
             return ToolResult(success=False, message=f"获取表列表失败: {exc}")
 
     async def _do_execute(self, params: dict) -> ToolResult:
-        db_name = str(params.get("db_name") or "").strip()
+        sess = await ToolSession.load(params)
+        db_name = str(params.get("db_name") or sess.db_name).strip()
         if not db_name:
             return ToolResult(success=False, message="未选择数据集，请先选择要分析的数据集")
-        schema = str(params.get("db_schema") or "").strip()
+        schema = str(params.get("db_schema") or sess.db_schema).strip()
 
         from codegenx.ai_service.agent.db import postgres_manager
         # 用 postgres_manager.query 走连接池 + search_path 模式
@@ -307,7 +309,8 @@ class DescribeTableTool(BaseTool):
             return ToolResult(success=False, message=f"获取表结构失败: {exc}")
 
     async def _do_execute(self, params: dict) -> ToolResult:
-        db_name = str(params.get("db_name") or "").strip()
+        sess = await ToolSession.load(params)
+        db_name = str(params.get("db_name") or sess.db_name).strip()
         if not db_name:
             return ToolResult(success=False, message="未选择数据集，请先选择要分析的数据集")
 
@@ -315,7 +318,7 @@ class DescribeTableTool(BaseTool):
         schema_from_ref, table = _parse_table_ref(str(params.get("table_name") or "").strip())
         if not table:
             return ToolResult(success=False, message="请提供有效的表名")
-        schema = schema_from_ref or str(params.get("db_schema") or "").strip()
+        schema = schema_from_ref or str(params.get("db_schema") or sess.db_schema).strip()
 
         from codegenx.ai_service.agent.db import postgres_manager
         # 并行查：列信息、索引、表注释、行数估算
@@ -482,14 +485,15 @@ class SampleRowsTool(BaseTool):
             return ToolResult(success=False, message=f"采样数据失败: {exc}")
 
     async def _do_execute(self, params: dict) -> ToolResult:
-        db_name = str(params.get("db_name") or "").strip()
+        sess = await ToolSession.load(params)
+        db_name = str(params.get("db_name") or sess.db_name).strip()
         if not db_name:
             return ToolResult(success=False, message="未选择数据集，请先选择要分析的数据集")
 
         schema_from_ref, table = _parse_table_ref(str(params.get("table_name") or "").strip())
         if not table:
             return ToolResult(success=False, message="请提供有效的表名")
-        schema = schema_from_ref or str(params.get("db_schema") or "").strip()
+        schema = schema_from_ref or str(params.get("db_schema") or sess.db_schema).strip()
 
         limit = int(params.get("limit", 10))
         if limit < 1:
@@ -627,14 +631,15 @@ class DescribeTableStatsTool(BaseTool):
             _resolve_sample_pct,
         )
 
-        db_name = str(params.get("db_name") or "").strip()
+        sess = await ToolSession.load(params)
+        db_name = str(params.get("db_name") or sess.db_name).strip()
         if not db_name:
             return ToolResult(success=False, message="未选择数据集，请先选择要分析的数据集")
 
         schema_from_ref, table = _parse_table_ref(str(params.get("table_name") or "").strip())
         if not table:
             return ToolResult(success=False, message="请提供有效的表名")
-        schema = schema_from_ref or str(params.get("db_schema") or "").strip()
+        schema = schema_from_ref or str(params.get("db_schema") or sess.db_schema).strip()
 
         requested_columns = params.get("columns")
         requested_sample_pct = int(params.get("sample_pct", 100))

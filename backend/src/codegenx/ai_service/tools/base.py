@@ -1,5 +1,7 @@
 import asyncio
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Any
 
 from pydantic import BaseModel
@@ -24,6 +26,54 @@ class ToolResult(BaseModel):
     render:str= ""  # 展示用
     extras: dict[str, Any] = {}  # 追踪/观测用附加数据（不进 LLM 上下文，由 hook 消费）
     error_class: str = ""  # 失败分类（执行器透传给监控指标；空=按消息自动判定）
+
+
+@dataclass(frozen=True)
+class ToolSession:
+    """工具可读的会话上下文：只凭 session_id 解析，业务参数不进入工具入参。
+
+    执行器仅向 params 注入 session_id；工具按需自行取 app_id/user_id/当前数据集，
+    不再由外部塞入业务参数（工具保持"只做一件事"的纯粹性）。
+    """
+
+    session_id: str = ""
+    request_id: str = ""
+    app_id: str = "main"
+    user_id: str = ""
+    current_db: str | None = None  # 形如 datasource.schema
+
+    @classmethod
+    async def load(cls, params: dict[str, Any]) -> "ToolSession":
+        """按 params["session_id"] 从 SessionPool 取会话；无会话/无 id 时返回默认值。"""
+        session_id = str(params.get("session_id") or "")
+        if not session_id:
+            return cls()
+        from codegenx.ai_service.system_app import get_app
+
+        state = await get_app().session_pool.get(session_id)
+        if state is None:
+            return cls(session_id=session_id)
+        return cls(
+            session_id=session_id,
+            request_id=state.request_id,
+            app_id=state.app_id,
+            user_id=state.user_id,
+            current_db=state.current_db,
+        )
+
+    @property
+    def db_name(self) -> str:
+        return self.current_db.split(".", 1)[0] if self.current_db and "." in self.current_db else ""
+
+    @property
+    def db_schema(self) -> str:
+        return self.current_db.split(".", 1)[1] if self.current_db and "." in self.current_db else ""
+
+    def workspace(self) -> Path:
+        """用户项目目录（文件类工具的工作根）。"""
+        from shared.constants import get_code_dir
+
+        return get_code_dir(self.user_id or "main", self.app_id or "main")
 
 
 class BaseTool(ABC):

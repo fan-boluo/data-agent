@@ -74,16 +74,7 @@
     }
   },
   "tools": {
-    "excluded": ["bash"],
-    "mysql": {
-      "host": "127.0.0.1",
-      "port": 3306,
-      "user": "readonly",
-      "password": "",
-      "databases": null,
-      "poolSize": 5,
-      "connectTimeout": 10
-    }
+    "excluded": ["bash"]
   },
   "memory": {
     "search": {

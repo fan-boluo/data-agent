@@ -230,8 +230,9 @@ backend/src/codegenx/ai_service/
 │   ├── auto_plan_manager.py    # 请求执行入口（单跳直通 user→leader）
 │   ├── runtime_schema.py       # RuntimeSessionState + TurnStoppedError
 │   ├── agents/                 # Agent 实现
-│   ├── tool_handler.py         # ToolRegistry（启动扫描 + child_view）
-│   ├── tool_executor.py        # ToolExecutor（统一执行）
+│   ├── tools/                  # tool_handler（注册表）/ tool_executor（执行）/ tool_guards（门禁）等
+│   │   ├── tool_handler.py     # ToolRegistry（启动扫描 + child_view）
+│   │   └── tool_executor.py    # ToolExecutor（统一执行）
 │   ├── agent_instances.py      # 智能体组合根（initialize_agent_instances）
 │   └── agent_registry.py       # AgentRegistry + AgentSpec
 ├── hook/                        # Hook 事件系统

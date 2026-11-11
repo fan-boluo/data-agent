@@ -10,7 +10,7 @@ from collections import defaultdict
 from difflib import SequenceMatcher
 from typing import Any
 
-from codegenx.ai_service.tools.base import BaseTool, ToolResult
+from codegenx.ai_service.tools.base import BaseTool, ToolResult, ToolSession
 from shared import log
 
 
@@ -163,7 +163,7 @@ class GuessAnalysisTaskTool(BaseTool):
     async def _do_execute(
         self, params: dict, signal: asyncio.Event | None = None,
     ) -> ToolResult:
-        db_name = params.get("db_name")
+        db_name = params.get("db_name") or (await ToolSession.load(params)).db_name or None
         table_name = params.get("table_name")
         file_path = params.get("file_path")
 

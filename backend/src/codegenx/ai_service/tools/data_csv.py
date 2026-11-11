@@ -12,7 +12,7 @@ from typing import Any
 
 import numpy as np
 
-from codegenx.ai_service.tools.base import BaseTool, ToolResult
+from codegenx.ai_service.tools.base import BaseTool, ToolResult, ToolSession
 from codegenx.ai_service.data_analysis.csv_manager import CsvManager, CsvConfig
 from codegenx.ai_service.data_analysis.stats_engine import (
     compute_numeric_stats, compute_categorical_stats,
@@ -30,7 +30,7 @@ CSV_STATS_TIMEOUT = 30
 
 # ── 路径解析 ──────────────────────────────────────────────
 
-def _resolve_csv_context(params: dict, file_path: str) -> tuple[CsvManager, str]:
+async def _resolve_csv_context(params: dict, file_path: str) -> tuple[CsvManager, str]:
     """解析 LLM 传入的 file_path 并返回守卫目录正确的 CsvManager。
 
     LLM 只见文件名（真实路径不可见）：传文件名/相对路径时按用户项目 code_dir 解析；
@@ -38,10 +38,8 @@ def _resolve_csv_context(params: dict, file_path: str) -> tuple[CsvManager, str]
     守卫目录必须设为 code_dir：默认 /data/csv_files 在宿主机不存在，
     任何路径都会被误拒（app.log:149「文件不在允许的目录中」根因）。
     """
-    from shared.constants import get_code_dir
-    user_id = str(params.get("user_id") or "main")
-    app_id = str(params.get("app_id") or "main")
-    root = get_code_dir(user_id, app_id).resolve()
+    sess = await ToolSession.load(params)
+    root = sess.workspace().resolve()
 
     p = Path(file_path)
     if not (p.is_absolute() and p.exists()):
@@ -135,7 +133,7 @@ class DescribeCsvTool(BaseTool):
         self, params: dict, signal: asyncio.Event | None = None,
     ) -> ToolResult:
         file_path = params["file_path"]
-        mgr, file_path = _resolve_csv_context(params, file_path)
+        mgr, file_path = await _resolve_csv_context(params, file_path)
 
         info = mgr.read_info(file_path)
         sample = mgr.read_sample(file_path, limit=5)
@@ -215,7 +213,7 @@ class SampleCsvRowsTool(BaseTool):
         if limit > 100:
             limit = 100
 
-        mgr, file_path = _resolve_csv_context(params, file_path)
+        mgr, file_path = await _resolve_csv_context(params, file_path)
         sample = mgr.read_sample(file_path, limit=limit)
 
         output = f"CSV 采样 ({sample['n_rows_sampled']} 行):\n"
@@ -296,7 +294,7 @@ class DescribeCsvStatsTool(BaseTool):
         requested_sample_pct = int(params.get("sample_pct", 100))
         timeout = int(params.get("timeout_seconds", CSV_STATS_TIMEOUT))
 
-        mgr, file_path = _resolve_csv_context(params, file_path)
+        mgr, file_path = await _resolve_csv_context(params, file_path)
         info = mgr.read_info(file_path)
         est_rows = info["estimated_rows"]
         all_col_names = info["columns"]
@@ -413,7 +411,7 @@ class DescribeCsvStatsTool(BaseTool):
 # ═══════════════════════════════════════════════════════════
 
 class ListCsvFilesTool(BaseTool):
-    """列出当前用户项目下的 csv 文件（user_id/app_id 由 ToolExecutor 注入）。
+    """列出当前用户项目下的 csv 文件（归属由 session_id 解析）。
 
     返回的完整路径可后续作为 describe_csv 的 file_path 参数使用。
     """
@@ -444,18 +442,16 @@ class ListCsvFilesTool(BaseTool):
         self, params: dict, signal: asyncio.Event | None = None,
     ) -> ToolResult:
         try:
-            return self._do_execute(params)
+            return await self._do_execute(params)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             log.warning("list_csv_files 执行异常: {}", exc)
             return ToolResult(success=False, message=f"列出 csv 文件失败: {exc}")
 
-    def _do_execute(self, params: dict) -> ToolResult:
-        from shared.constants import get_code_dir
-        user_id = str(params.get("user_id") or "main")
-        app_id = str(params.get("app_id") or "main")
-        code_dir = get_code_dir(user_id, app_id)
+    async def _do_execute(self, params: dict) -> ToolResult:
+        sess = await ToolSession.load(params)
+        code_dir = sess.workspace()
         if not code_dir.exists():
             return ToolResult(success=True, data=f"（项目目录不存在: {code_dir}）")
 

@@ -77,3 +77,34 @@ def is_infra_failure(exc: BaseException | None = None, message: str = "") -> boo
         return True
     text = f"{type(exc).__name__ if exc else ''} {exc or ''} {message}".lower()
     return any(hint in text for hint in _INFRA_HINTS)
+
+
+# ── 执行器侧的最小接口：准入 / 归还 / 记账（分类口径留在本模块）─────────────
+
+async def acquire_slot(tool_name: str) -> bool:
+    """熔断准入（False=快速失败；半开态占用一个探测名额）。"""
+    return await get_tool_breaker(tool_name).acquire()
+
+
+async def release_slot(tool_name: str) -> None:
+    """归还半开探测名额（请求取消等无结果场景）。"""
+    await get_tool_breaker(tool_name).release()
+
+
+async def record_outcome(
+    tool_name: str, *, success: bool, error_class: str = "", message: str = "",
+) -> str:
+    """记账一次调用结果，返回归一后的 error_class（供指标/日志使用）。"""
+    breaker = get_tool_breaker(tool_name)
+    if success:
+        await breaker.record_success()
+        return ""
+    # 分类口径：超时/执行异常计入熔断；工具自报业务分类（arg_invalid/subagent_failed 等）
+    # 不计；未分类时按消息特征判定，非基础设施类记为 arg_invalid
+    if error_class:
+        counted = error_class in ("timeout", "execution")
+    else:
+        counted = is_infra_failure(message=message)
+        error_class = "execution" if counted else "arg_invalid"
+    await breaker.record_failure(count_as_failure=counted)
+    return error_class

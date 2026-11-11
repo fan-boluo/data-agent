@@ -37,7 +37,9 @@ def _generic_semantics(arguments: dict, result: Any) -> tuple[dict, dict]:
     return dict(arguments or {}), tool_result
 
 
-def _extract_semantics(name: str, arguments: dict, result: Any) -> tuple[dict, dict]:
+def _extract_semantics(
+    name: str, arguments: dict, result: Any, session: Any = None,
+) -> tuple[dict, dict]:
     """按工具提取 (入参, 结果)：语义工具做结构化提取，其余工具走通用提取。"""
     extras = getattr(result, "extras", None) or {}
     if name == "execute_postgresql":
@@ -45,7 +47,11 @@ def _extract_semantics(name: str, arguments: dict, result: Any) -> tuple[dict, d
         sql = str(arguments.get("sql") or "")
         if sql:
             tool_args["sql"] = sql
-        datasource = arguments.get("datasource") or arguments.get("db_name")
+        # 工具入参不再注入 db_name，未显式传时取会话当前数据集
+        datasource = (
+            arguments.get("datasource") or arguments.get("db_name")
+            or getattr(session, "current_db", None)
+        )
         if datasource:
             tool_args["datasource"] = str(datasource)
         tool_result: dict[str, Any] = {}
@@ -114,7 +120,7 @@ async def tool_semantics_recorder(ctx: HookContext) -> None:
         result = ctx.data.get("result")
         # tool_call_id = LLM 调用 id（与 span/tool 消息配对）；非 LLM 发起时 uuid 兜底
         tool_call_id = str(tc.get("id") or "") or f"call-{uuid.uuid4().hex}"
-        tool_args, tool_result = _extract_semantics(name, arguments, result)
+        tool_args, tool_result = _extract_semantics(name, arguments, result, session)
         # 大入参先落盘（write_file content 等），再按 trace 配置截断兜底
         if name not in _STRUCTURED_ARG_TOOLS:
             tool_args = _spill_large_args(tool_args, tool_call_id, session)

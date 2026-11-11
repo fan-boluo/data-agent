@@ -24,8 +24,13 @@ backend/src/codegenx/ai_service/
 │   ├── agent_instances.py           # 组合根：initialize_agent_instances + _AGENT_CLASSES
 │   ├── agent_registry.py            # AgentRegistry + AgentSpec（规格注册表）
 │   ├── agent_schema.py              # AgentState / AgentEventType
-│   ├── tool_executor.py             # ToolExecutor（统一执行 + safe_path_guard hook）
-│   ├── tool_handler.py              # ToolRegistry（启动扫描 + child_view 过滤）
+│   ├── tools/
+│   │   ├── tool_executor.py         # ToolExecutor（统一执行 + 熔断记账 + span）
+│   │   ├── tool_guards.py           # BEFORE_TOOL_CALL 门禁（许可规则链 + HITL 审批）
+│   │   ├── permission.py            # PermissionManager（存在性/配额/路径/熔断规则）
+│   │   ├── tool_context.py          # 入参注入（仅 session_id）+ 按签名装配执行参数
+│   │   ├── tool_circuit.py          # 工具级熔断准入/归还/记账
+│   │   └── tool_handler.py          # ToolRegistry（启动扫描 + child_view 过滤）
 │   ├── agents/
 │   │   ├── agent.py                 # Agent 抽象基类 + AgentMessage
 │   │   ├── base_react_agent.py      # BaseReActAgent（ReAct 循环 + tool_calls）
@@ -50,7 +55,7 @@ backend/src/codegenx/ai_service/
 |---|---|---|---|
 | **leader** | 主控：编排 + 直答 + 派发 | 全部工具（含 dispatch_agent + task_*） | ✅ 注入 `chat_messages[:-1]` |
 | **planner** | 规划：拆解任务 + 登记看板 | 仅 task_* 工具（看板管理） | ❌ 任务自包含 |
-| **data_explore** | 数据探索：MySQL 查询 + 统计 | execute_sql / describe_table_stats / list_tables / describe_table / sample_rows | ❌ 任务自包含 |
+| **data_explore** | 数据探索：查询 + 统计 | execute_sql / describe_table_stats / list_tables / describe_table / sample_rows | ❌ 任务自包含 |
 | **csv_explore** | CSV 探索：文件读取 + 统计 | describe_csv / sample_csv_rows / describe_csv_stats / list_csv_files | ❌ 任务自包含 |
 
 ### 注册机制

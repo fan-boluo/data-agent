@@ -13,8 +13,8 @@ from codegenx.ai_service.tools.file import WriteFileTool, ReadFileTool
 from codegenx.ai_service.utils.config import config
 from shared import log
 
-# 工具目录
-BUILTIN_TOOLS_DIR = Path(__file__).parent.parent / "tools"
+# 内置工具实现目录：agent/tools/ 只放执行链路，工具实现在 ai_service/tools/
+BUILTIN_TOOLS_DIR = Path(__file__).resolve().parents[2] / "tools"
 
 class ToolRegistry(BaseComponent):
     """启动扫描一次的全局工具注册表（进程级组件，子代理用 child_view 出过滤视图）。"""

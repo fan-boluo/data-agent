@@ -159,4 +159,7 @@ class LeaderAgent(BaseReActAgent):
         msg.task_id = None
         msg.step_id = None
         msg.success = True
+
+        # 终答质量审查（critic）已下线，待重新规划：单次审查难以覆盖复杂任务的
+        # 多步证据链，整段历史送审又会混入其他轮次内容，判定不可靠
         return msg

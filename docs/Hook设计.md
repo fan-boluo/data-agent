@@ -22,7 +22,7 @@ Hook 是执行流上的**拦截 / 扩展点**，核心价值是把**横切关注
 | `on_turn_start` | 单轮请求开始 | SERIAL | ❌ | SWALLOW | （预留） |
 | `before_llm_invoke` | LLM 调用前 | SERIAL | ✅ | BLOCKED | （预留） |
 | `after_llm_invoke` | LLM 返回后 | PARALLEL | ❌ | SWALLOW | （预留） |
-| `before_tool_call` | 工具调用前 | SERIAL | ✅ | BLOCKED | safe_path_guard / file_tool_param_guard / sql_trace_start |
+| `before_tool_call` | 工具调用前 | SERIAL | ✅ | BLOCKED | tool_permission_guard / file_tool_param_guard / hitl_approval_guard / sql_trace_start |
 | `after_tool_call` | 工具返回后 | PARALLEL | ❌ | SWALLOW | persist_tool_log / tool_semantics_recorder / sql_trace_end |
 | `on_turn_end` | 单轮结束（finally，含异常路径） | SERIAL | ❌ | SWALLOW | memory_turn_signal |
 | `on_session_end` | 会话关闭 | SERIAL | ❌ | RAISE | memory_session_end |
@@ -45,8 +45,9 @@ Hook 是执行流上的**拦截 / 扩展点**，核心价值是把**横切关注
 | 监听器 | 事件 | priority | 位置 | 功能 |
 |---|---|---|---|---|
 | `inputput_safety_check` | on_user_input | 10 | `guardrail/prompt_safety_input_guardrail.py` | 用户输入安全检查，可 blocked |
-| `safe_path_guard` | before_tool_call | 30 | `agent/tool_executor.py` | 工具调用路径安全守卫，可 blocked |
+| `tool_permission_guard` | before_tool_call | 10 | `agent/tools/tool_guards.py` | 许可规则链（存在性/配额/路径/熔断），可 blocked |
 | `file_tool_param_guard` | before_tool_call | 20 | `tools/base.py` | 文件工具参数守卫，可 blocked |
+| `hitl_approval_guard` | before_tool_call | 50 | `agent/tools/tool_guards.py` | 高风险工具调用挂起审批，可 blocked |
 | `sql_trace_start` | before_tool_call | 100 | `hook/analysis_trace.py` | SQL 工具调用追踪起点（condition=_is_execute_sql） |
 | `persist_tool_log` | after_tool_call | 10 | `chat_message/persist.py` | 工具执行日志落盘 |
 | `tool_semantics_recorder` | after_tool_call | 50 | `hook/tool_semantics.py` | 工具调用记录（全部工具入参/结果落表） |

@@ -202,6 +202,13 @@ class CircuitBreaker:
         """状态对应的指标数值（0=closed 1=half_open 2=open）。"""
         return self._STATE_CODE[self._state]
 
+    def is_open(self) -> bool:
+        """熔断打开且仍在冷却期（只读判断，不触发状态迁移）。
+
+        供执行前的可用性检查使用；冷却到期后由 acquire() 迁移到 half_open。
+        """
+        return self._state == "open" and time.monotonic() - self._opened_at < self._recovery_timeout
+
     async def acquire(self) -> bool:
         """请求进入前调用。False = 快速失败，调用方应立即走 fallback。"""
         async with self._lock:

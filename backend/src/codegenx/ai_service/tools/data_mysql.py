@@ -33,8 +33,7 @@ MAX_COLS_WIDE_TABLE = 20
 COL_STATS_TIMEOUT = 30
 
 # ── 单例 ──────────────────────────────────────────────────
-# F-4：改用 mysql_manager.get_mysql_manager() 共享进程级单例，
-# 连接配置来自 config.json tools.mysql（原先各模块自建实例只会用默认 readonly/空密码）
+# 复用 mysql_manager.get_mysql_manager() 共享进程级单例（连接参数来自 .env）
 
 
 # ═══════════════════════════════════════════════════════════

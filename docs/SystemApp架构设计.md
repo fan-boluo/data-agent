@@ -35,7 +35,7 @@
 |---|---|---|---|
 | 1 | llm_facade | LLMFacade | LLM 多 provider 统一门面（DashScope / DeepSeek / vLLM / 自定义），预热默认模型 |
 | 2 | tool_registry | ToolRegistry | 启动即扫描 tools/ 目录，注册所有继承 BaseTool 的工具类；`child_view()` 产出过滤子视图（零重扫） |
-| 3 | tool_executor | ToolExecutor | 统一工具执行入口 + `safe_path_guard` hook |
+| 3 | tool_executor | ToolExecutor | 统一工具执行入口（门禁 hook 见 `agent/tools/tool_guards.py`） |
 | 4 | skill_manager | SkillManager | 可插拔技能系统（SKILL.md 提示词模板装载） |
 | 5 | agent_registry | AgentRegistry | 智能体规格注册表（AgentSpec：id / role / name / cls / tools 白名单） |
 | 6 | session_persistence | SessionPersistence | 会话快照落盘 + 按 (user, app, session) 锁表 |

@@ -2,11 +2,13 @@
 
 基于 **读库模式** 的 Text2SQL 问答质量批量评测。后端走真实 chat 链路（leader 路由、hook、trace 全在），每题独立会话无状态，可复现、可归因。
 
+> 评测 CLI 已迁到后端包内：`backend/src/codegenx/ai_service/eval/eval.py`（与服务端 runner 共享 scorer）。
+> 本目录只保留题集、标签、报告与辅助脚本，下述命令均在**仓库根目录**执行。
+
 ## 目录结构
 
 ```
-eval/
-├── eval.py                      # 评测闭环脚本（import-cases / replay / score / report）
+scripts/eval/
 ├── retag_cases.py               # 自动重打标签（根据 gold_sql 语法推断 ops/grain）
 ├── tags_schema.md               # 固化标签体系（所有评测题目必须从此枚举取值）
 ├── report/                      # 评测报告输出目录（自动带时间戳命名）
@@ -30,13 +32,13 @@ eval/
 
 ```bash
 # 重打 dvdrental 标签
-python eval/retag_cases.py --dataset dvdrental
+python scripts/eval/retag_cases.py --dataset dvdrental
 
 # 重打 tpcds_sf1 标签
-python eval/retag_cases.py --dataset tpcds_sf1
+python scripts/eval/retag_cases.py --dataset tpcds_sf1
 
 # 两个都重打
-python eval/retag_cases.py --dataset all
+python scripts/eval/retag_cases.py --dataset all
 ```
 
 脚本会备份原文件为 `.bak`（如 `question.json.bak`），原地写回。
@@ -45,10 +47,10 @@ python eval/retag_cases.py --dataset all
 可重复执行，根据题集中的id字段更新题目
 ```bash
 # dvdrental 导入（upsert，dataset+question 唯一键）
-python eval/eval.py import-cases --file eval/dvdrental/question.json --name dvdrental --db business --status verified
+python backend/src/codegenx/ai_service/eval/eval.py import-cases --file scripts/eval/dvdrental/question.json --name dvdrental --db business --status verified
 
 # tpcds_sf1 导入
-python eval/eval.py import-cases --file eval/tpcds_sf1/tpcds_eval_sf1_final.json --name tpcds_sf1 --db tpcds_sf1 --status verified
+python backend/src/codegenx/ai_service/eval/eval.py import-cases --file scripts/eval/tpcds_sf1/tpcds_eval_sf1_final.json --name tpcds_sf1 --db tpcds_sf1 --status verified
 ```
 
 导入后数据写入 PostgreSQL `telemetry.eval_datasets` + `telemetry.eval_cases` 表。
@@ -65,16 +67,16 @@ cd backend; .venv\Scripts\python.exe -m codegenx
 
 ```bash
 # 重放 dvdrental 全部 46 题
-python eval/eval.py replay --account boluo --password boluo123 --app-id app_0001 --dataset dvdrental
+python backend/src/codegenx/ai_service/eval/eval.py replay --account boluo --password boluo123 --app-id app_0001 --dataset dvdrental
 
 # 重放指定 case id（调试用）
-python eval/eval.py replay --account boluo --password boluo123 --app-id app_0001 --ids 35,37
+python backend/src/codegenx/ai_service/eval/eval.py replay --account boluo --password boluo123 --app-id app_0001 --ids 35,37
 
 # 同时重放 dvdrental + tpcds_sf1
-python eval/eval.py replay --account boluo --password boluo123 --app-id app_0001 --dataset dvdrental,tpcds_sf1
+python backend/src/codegenx/ai_service/eval/eval.py replay --account boluo --password boluo123 --app-id app_0001 --dataset dvdrental,tpcds_sf1
 
 # 单题测试（加 --limit 限制题数）
-python eval/eval.py replay --account boluo --password boluo123 --app-id app_0001 --dataset dvdrental --limit 3
+python backend/src/codegenx/ai_service/eval/eval.py replay --account boluo --password boluo123 --app-id app_0001 --dataset dvdrental --limit 3
 ```
 
 | 参数 | 说明 |
@@ -94,13 +96,13 @@ python eval/eval.py replay --account boluo --password boluo123 --app-id app_0001
 
 ```bash
 # 评全部
-python eval/eval.py score
+python backend/src/codegenx/ai_service/eval/eval.py score
 
 # 只评某时刻之后（避免重复评分）
-python eval/eval.py score --since 2026-11-05T10:00:00
+python backend/src/codegenx/ai_service/eval/eval.py score --since 2026-11-05T10:00:00
 
 # 评指定 trace
-python eval/eval.py score --trace-id eval-35-43c02c12
+python backend/src/codegenx/ai_service/eval/eval.py score --trace-id eval-35-43c02c12
 ```
 
 | 指标 | 含义 |
@@ -122,17 +124,17 @@ EX 判定分两级：
 
 ### 4. 报告（report）
 
-聚合 trace_scores + 逐题链路复现。**默认输出 `eval/report/report_YYYYMMDD_HHMMSS.md`**。
+聚合 trace_scores + 逐题链路复现。**默认输出 `scripts/eval/report/report_YYYYMMDD_HHMMSS.md`**。
 
 ```bash
-# 默认输出（自动时间戳，放 eval/report/）
-python eval/eval.py report
+# 默认输出（自动时间戳，放 scripts/eval/report/）
+python backend/src/codegenx/ai_service/eval/eval.py report
 
 # 聚合某时刻之后的 trace，一般score评分做了选取，这里也要选取相同时间范围的
-python eval/eval.py report --since 2026-11-05
+python backend/src/codegenx/ai_service/eval/eval.py report --since 2026-11-05
 
 # 显式指定输出路径
-python eval/eval.py report --out eval/report/my_test.md
+python backend/src/codegenx/ai_service/eval/eval.py report --out scripts/eval/report/my_test.md
 ```
 
 报告内容分五块：
@@ -159,15 +161,15 @@ python eval/eval.py report --out eval/report/my_test.md
 
 ```bash
 # 完整评测 dvdrental
-python eval/eval.py replay --account boluo --password boluo123 --app-id app_0001 --dataset dvdrental
-python eval/eval.py score
-python eval/eval.py report
+python backend/src/codegenx/ai_service/eval/eval.py replay --account boluo --password boluo123 --app-id app_0001 --dataset dvdrental
+python backend/src/codegenx/ai_service/eval/eval.py score
+python backend/src/codegenx/ai_service/eval/eval.py report
 
 # 重打标签 → 同步 → 全量重评（题集有更新时）
-python eval/retag_cases.py --dataset all
-python eval/eval.py import-cases --file eval/dvdrental/question.json --name dvdrental --db business --status verified
-python eval/eval.py import-cases --file eval/tpcds_sf1/tpcds_eval_sf1_final.json --name tpcds_sf1 --db tpcds_sf1 --status verified
-python eval/eval.py replay --account boluo --password boluo123 --app-id app_0001 --dataset dvdrental,tpcds_sf1
-python eval/eval.py score
-python eval/eval.py report
+python scripts/eval/retag_cases.py --dataset all
+python backend/src/codegenx/ai_service/eval/eval.py import-cases --file scripts/eval/dvdrental/question.json --name dvdrental --db business --status verified
+python backend/src/codegenx/ai_service/eval/eval.py import-cases --file scripts/eval/tpcds_sf1/tpcds_eval_sf1_final.json --name tpcds_sf1 --db tpcds_sf1 --status verified
+python backend/src/codegenx/ai_service/eval/eval.py replay --account boluo --password boluo123 --app-id app_0001 --dataset dvdrental,tpcds_sf1
+python backend/src/codegenx/ai_service/eval/eval.py score
+python backend/src/codegenx/ai_service/eval/eval.py report
 ```

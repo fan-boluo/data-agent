@@ -12,7 +12,7 @@ from typing import Any, Literal
 import aiofiles
 from pydantic import BaseModel, Field
 
-from codegenx.ai_service.tools.base import BaseTool, ToolResult
+from codegenx.ai_service.tools.base import BaseTool, ToolResult, ToolSession
 from codegenx.ai_service.tools.truncate_utils import (
     DEFAULT_MAX_BYTES,
     DEFAULT_MAX_LINES,
@@ -212,7 +212,8 @@ class ReadFileTool(BaseTool):
         limit = params.get("limit")
 
         # Resolve path with macOS compatibility
-        absolute_path = resolve_read_path(path, params.get("app_id", "main"), params.get("user_id", "") or "")
+        sess = await ToolSession.load(params)  # 工具只拿 session_id，归属信息自行解析
+        absolute_path = resolve_read_path(path, sess.app_id, sess.user_id)
 
         # Enforce fs.workspaceOnly if configured
         check_path(absolute_path)
@@ -409,7 +410,8 @@ class WriteFileTool(BaseTool):
                 render=f"{self.name} 执行失败: 缺少 content 参数",
             )
         # 解析
-        absolute_path = resolve_read_path(path, params.get("app_id", "main"), params.get("user_id", "") or "")
+        sess = await ToolSession.load(params)
+        absolute_path = resolve_read_path(path, sess.app_id, sess.user_id)
         log.debug(f"解析后的完整写入路径为:{absolute_path}")
         # 创建父目录
         parant_path = absolute_path.parent
@@ -518,7 +520,8 @@ class EditFileTool(BaseTool):
         new_text = params["new_text"]
         position = params.get("position", "replace")
 
-        absolute_path = resolve_read_path(path, params.get("app_id", "main"), params.get("user_id", "") or "")
+        sess = await ToolSession.load(params)
+        absolute_path = resolve_read_path(path, sess.app_id, sess.user_id)
         check_path(absolute_path)
 
         if signal and signal.is_set():
@@ -672,7 +675,8 @@ class ListDirectoryTool(BaseTool):
         depth = params.get("depth", 1)
         glob_filter = params.get("glob")
 
-        absolute_path = resolve_read_path(path, params.get("app_id", "main"), params.get("user_id", "") or "")
+        sess = await ToolSession.load(params)
+        absolute_path = resolve_read_path(path, sess.app_id, sess.user_id)
 
         if signal and signal.is_set():
             raise asyncio.CancelledError("Operation aborted")
@@ -817,10 +821,11 @@ class DeleteFileTool(BaseTool):
         path = params["path"]
         recursive = params.get("recursive", False)
 
-        absolute_path = resolve_read_path(path, params.get("app_id", "main"), params.get("user_id", "") or "")
+        sess = await ToolSession.load(params)
+        absolute_path = resolve_read_path(path, sess.app_id, sess.user_id)
 
         # Enforce workspace boundary: reject paths outside the project workspace
-        workspace_root = get_code_dir(params.get("user_id", "") or "main", params.get("app_id", "main")).resolve()
+        workspace_root = sess.workspace().resolve()
         try:
             absolute_path.resolve().relative_to(workspace_root)
         except ValueError:

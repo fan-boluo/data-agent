@@ -66,7 +66,7 @@ groups:
             The context compressor may be broken or misconfigured.
 
       # -----------------------------------------------------------------------
-      # 5. 模型级熔断器打开（critical，供告警治理演示：抑制同类 warning）
+      # 5. 模型级熔断器打开（critical，供告警治理：抑制同类 warning）
       # -----------------------------------------------------------------------
       - alert: LLMCircuitOpen
         expr: codegenx_llm_circuit_state == 2

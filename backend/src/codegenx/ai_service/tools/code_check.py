@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from codegenx.ai_service.tools.base import BaseTool, ToolResult
+from codegenx.ai_service.tools.base import BaseTool, ToolResult, ToolSession
 from codegenx.ai_service.tools.file import resolve_read_path
 from shared import log
 
@@ -116,7 +116,8 @@ class CodeCheckTool(BaseTool):
                 message="缺少 path 参数。请提供要检查的 Python 文件路径。",
                 render=f"{self.name} 执行失败: 缺少 path 参数",
             )
-        file_path = resolve_read_path(path_str, params.get("app_id", "main"))
+        sess = await ToolSession.load(params)
+        file_path = resolve_read_path(path_str, sess.app_id, sess.user_id)
         file_path = file_path.resolve()
 
         if signal and signal.is_set():

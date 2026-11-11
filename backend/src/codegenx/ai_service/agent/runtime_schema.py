@@ -26,6 +26,8 @@ class ActivateTurn:
     started_at: float = 0.0
     finished_at: float = 0.0
     error_text: str = ""
+    # 本轮各工具调用次数（tool_name → 次数；每个请求重建 ActivateTurn，天然按 turn 归零）
+    tool_call_counts: dict[str, int] = field(default_factory=dict)
 
 
 def raise_if_stop_signal(session_state: RuntimeSessionState) -> None:
@@ -63,6 +65,9 @@ class RuntimeSessionState:
     stop_signal: asyncio.Event = field(default_factory=asyncio.Event)
     stop_reason: str = ""
     worker_task: asyncio.Task | None = None  # 一个携程任务
+
+    # HITL 审批：当前请求挂起的审批项（approval_id → 元数据；future 在 hitl.ApprovalGate）
+    pending_approvals: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     # 说明：Supervisor 编排共享状态已收敛至任务看板（按 request 落盘），
     # RuntimeSessionState 保持纯运行时调度职责。

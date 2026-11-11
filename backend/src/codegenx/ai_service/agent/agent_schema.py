@@ -23,6 +23,8 @@ class AgentEventType(str, Enum):
     REQUEST_STOPPED = "RequestStopped"
     ERROR = "Error"
     PLAN_STEP_CHANGED = "PlanStepChanged"
+    # HITL 闸门：高风险工具调用挂起，等待人工审批（前端弹窗消费）
+    APPROVAL_REQUIRED = "ApprovalRequired"
     # 分析链路事件（前端"分析链路"Tab 消费；命名与前端 eventType 对齐）
     SQL_START = "SQL_Start"
     SQL_END = "SQL_End"

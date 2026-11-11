@@ -158,28 +158,6 @@ class GatewayConfig(Base):
 
 
 #  tool -------------------------
-class ToolsMysqlConfig(Base):
-    """数据分析 MySQL 只读连接（F-4：原先硬编码 readonly/空密码，凭据无处配置）。
-
-    对应数据源账号需在 MySQL 侧预先建好，例如：
-      CREATE USER 'readonly'@'localhost' IDENTIFIED BY '***';
-      GRANT SELECT ON prj_ec.* TO 'readonly'@'localhost';
-    """
-    host: str = "127.0.0.1"
-    port: int = 3306
-    user: str = "readonly"
-    password: str = ""
-    databases: List[str] | None = None  # 白名单，None = 不限制
-    pool_size: int = Field(
-        default=5,
-        validation_alias=AliasChoices("poolSize", "pool_size"),
-    )
-    connect_timeout: int = Field(
-        default=10,
-        validation_alias=AliasChoices("connectTimeout", "connect_timeout"),
-    )
-
-
 class ToolCircuitConfig(Base):
     """工具/数据源级熔断（P0-2）。
 
@@ -199,8 +177,11 @@ class ToolsConfig(Base):
     excluded:list = Field(default_factory=list)
     persist_threshold: int = Field(default=30000)  # 持久化阈值
     preview_chars: int = Field(default=2000) # 展示长度
-    mysql: ToolsMysqlConfig = Field(default_factory=ToolsMysqlConfig)  # 数据分析工具的只读连接
     circuit: ToolCircuitConfig = Field(default_factory=ToolCircuitConfig)  # 工具级熔断
+    max_calls_per_tool: int = Field(
+        default=20,
+        validation_alias=AliasChoices("maxCallsPerTool", "max_calls_per_tool"),
+    )  # 同工具单请求调用次数上限（0=关闭；超限由 BEFORE_TOOL_CALL 配额守卫阻断）
     # exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
     # restrict_to_workspace: bool = False  # If true, restrict all tool access to workspace directory
     # mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
@@ -515,6 +496,49 @@ class MultiAgentsConfig(Base):
     df_spill_threshold_mb: int = Field(default=50)  # 产物序列化超过该阈值落盘 parquet，否则进 Redis
 
 
+class EvalConfig(Base):
+    """评测平台参数（P0-2：API 触发 → 内部重放 → 评分 → 汇总）。
+
+    重放走本机 HTTP（与真实用户同入口），账号为评测专用管理员。
+    """
+    enabled: bool = False  # 后台评测执行总开关（默认关：评测体系待重新规划，避免消耗模型额度）
+    base_url: str = ""  # 空则按 shared settings 的 host:port 自动拼
+    account: str = "boluo"  # 评测账号（需管理员，才可读 admin 接口）
+    password: str = "boluo123"
+    app_id: str = "app_0001"
+    timeout_seconds: float = Field(default=180.0)  # 单题一次对话的总超时
+    interval_seconds: float = Field(default=0.0)   # 逐题间隔（限流用）
+
+
+class HitlConfig(Base):
+    """Human-in-the-loop 审批闸门（P0-3：高风险工具调用执行前挂起等人工确认）。"""
+    enabled: bool = True                    # 总开关；关闭则所有调用直接放行
+    timeout_seconds: float = Field(default=300.0)  # 超时未处理自动拒绝（防止请求永久挂起）
+    auto_approve: bool = Field(default=False)      # 评测/压测重放可打开，避免阻塞等人
+    require_write: bool = True              # 写文件/写 SQL/执行命令需审批
+    require_cross_schema: bool = True       # 访问当前数据集之外的 schema 需审批
+    require_export: bool = True             # 结果落盘/导出需审批
+    require_full_scan: bool = True          # 无 WHERE 无 LIMIT 或 LIMIT 超阈值需审批
+    max_scan_rows: int = Field(default=1_000_000)  # LIMIT 行数阈值（超过视为大范围扫描）
+
+
+class CriticConfig(Base):
+    """Critic 审查闭环（P0-6 Reflection：终答前质量审查，fail 最多重派 max_retry 次）。"""
+    enabled: bool = Field(default=False)  # 默认关（额外一次 LLM 调用），评测对比时再开
+    max_retry: int = Field(
+        default=1,
+        validation_alias=AliasChoices("maxRetry", "max_retry"),
+    )  # 审查不通过时最多重派次数（禁止无限循环）
+    model_name: str = Field(
+        default="",
+        validation_alias=AliasChoices("modelName", "model_name"),
+    )  # 逗号分隔模型链；空则用默认模型
+    min_answer_chars: int = Field(
+        default=60,
+        validation_alias=AliasChoices("minAnswerChars", "min_answer_chars"),
+    )  # 答复短于此长度不审（寒暄/一句话直答）
+
+
 class Config(BaseSettings):
     agents: List[AgentConfig] = Field(default_factory=list)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
@@ -532,6 +556,9 @@ class Config(BaseSettings):
     compact: CompactConfig = Field(default_factory=CompactConfig)
     session: SessionConfig = Field(default_factory=SessionConfig)
     multi_agents: MultiAgentsConfig = Field(default_factory=MultiAgentsConfig)
+    eval_config: EvalConfig = Field(default_factory=EvalConfig, alias="eval")
+    hitl: HitlConfig = Field(default_factory=HitlConfig)
+    critic: CriticConfig = Field(default_factory=CriticConfig)
 
     def get_default_agent(self) -> AgentConfig:
         if not self.agents:
