@@ -4,6 +4,7 @@ import { useOpenedChatsStore } from '@/stores/openedChats'
 import request from '@/request'
 import { API_BASE_URL } from '@/config/env'
 import type { ElementInfo } from '@/utils/visualEditor'
+import { SQL_SNIPPET_LEN } from './useChatMessages'
 import type { MessageItem, useChatMessages } from './useChatMessages'
 import type { useTraceTimeline } from './useTraceTimeline'
 import { createClientId, getAuthHeaders } from './chatHelpers'
@@ -70,7 +71,7 @@ export function useChatStream(options: UseChatStreamOptions) {
   } = options
   const {
     applyMessageChunk, appendAiStep, updateLastRunningToolStep, failAllRunningToolSteps,
-    appendMediaItem, appendSqlCardItem, finalizeFinalAnswer, getMessageAt, scrollToBottom,
+    appendMediaItem, finalizeFinalAnswer, getMessageAt, scrollToBottom,
     markMessageError,
   } = messagesApi
 
@@ -86,6 +87,9 @@ export function useChatStream(options: UseChatStreamOptions) {
 
   // Track file-modifying tools for intelligent tree refresh
   const hadFileChangeInGeneration = ref(false)
+
+  // tool_id → 分析链路工具节点 id：主对话 SQL 卡片点击跳转定位用
+  const toolNodeIdMap = new Map<string, string>()
 
   const clearActiveGeneration = (requestId?: string) => {
     if (requestId && activeGenerationRequestId.value && activeGenerationRequestId.value !== requestId) return
@@ -141,23 +145,6 @@ export function useChatStream(options: UseChatStreamOptions) {
     }
 
     // ---- 分析链路专用事件（推右栏 trace，不混入 messages）----
-    if (eventType === 'SQL_Start') {
-      timeline.addTraceStep({ type: 'sql', title: 'SQL 查询', sql: eventData?.sql || '', durationMs: undefined })
-      return
-    }
-    if (eventType === 'SQL_End') {
-      const step = timeline.updateLastRunningTraceStep('sql', {
-        sql: eventData?.sql,
-        rowCount: eventData?.row_count ?? eventData?.rowCount,
-        durationMs: eventData?.duration_ms ?? eventData?.durationMs,
-        rowsPreview: eventData?.rows_preview || [],
-        status: (eventData?.state === 'success') ? 'completed' : 'failed',
-        error: eventData?.error || undefined,
-      })
-      // 同步往当前 AI 消息的 items 推一张 SQL 卡片（点击可跳到分析链路对应步骤）
-      if (step) appendSqlCardItem(step)
-      return
-    }
     if (eventType === 'Chart_Start') {
       timeline.addTraceStep({ type: 'chart', title: eventData?.title || '生成可视化', chartType: eventData?.chart_type || '' })
       return
@@ -201,9 +188,11 @@ export function useChatStream(options: UseChatStreamOptions) {
     }
     if (eventType === 'ToolExecutionStart') {
       const toolName = eventData?.tool_name || eventData?.name || eventData?.function?.name || 'unknown'
-      appendAiStep({ eventType, description: `${toolName}`, detail: '', state: 'running', timestamp: Date.now(), toolId: eventData?.tool_id || '' })
-      // 时间线：新增工具节点（参数摘要）；事件携带 task_id 时归到对应计划任务
-      timeline.addToolNode(String(eventData?.tool_id || ''), String(toolName), eventData?.arguments, Number(eventData?.task_id ?? 0) || undefined)
+      const toolId = String(eventData?.tool_id || '')
+      appendAiStep({ eventType, description: `${toolName}`, detail: '', state: 'running', timestamp: Date.now(), toolId })
+      // 时间线：所有工具统一生成工具节点（SQL 工具由 ToolNodeItem 渲染成 SQL 卡片）；事件携带 task_id 时归到对应计划任务
+      const nodeId = timeline.addToolNode(toolId, String(toolName), eventData?.arguments, Number(eventData?.task_id ?? 0) || undefined)
+      if (toolId && nodeId) toolNodeIdMap.set(toolId, nodeId)
       return
     }
     if (eventType === 'ToolExecutionEnd') {
@@ -226,15 +215,27 @@ export function useChatStream(options: UseChatStreamOptions) {
       if (isSuccess && FILE_MODIFY_TOOLS.has(toolName)) {
         hadFileChangeInGeneration.value = true
       }
-      updateLastRunningToolStep(detail, isSuccess ? 'completed' : 'failed', toolId)
       // 时间线：回填工具节点状态/耗时/展示元数据（task 工具 render 压成一行摘要，其余原样保留）
-      timeline.completeToolNode(String(toolId), String(toolName), isSuccess, {
+      // SQL 工具额外携带 sql/row_count/rows_preview，节点据此渲染成 SQL 卡片
+      const sqlText = String(eventData?.sql || '')
+      const nodeId = timeline.completeToolNode(String(toolId), String(toolName), isSuccess, {
         render: isTaskTool ? summarizeTaskRender(eventData?.render) : String(eventData?.render || ''),
         images,
         report,
         chartOption,
         error: !isSuccess ? String(eventData?.error_class || description || '执行失败') : undefined,
+        sql: sqlText || undefined,
+        rowCount: eventData?.row_count ?? undefined,
+        rowsPreview: Array.isArray(eventData?.rows_preview) ? eventData.rows_preview : undefined,
       })
+      // 主对话：SQL 工具步骤带卡片数据（替换原 execute_xxx + 独立 SQL 卡片的两条展示），一次性更新 running 步骤
+      const sqlCard = sqlText ? {
+        stepId: nodeId || toolNodeIdMap.get(String(toolId)) || '',
+        snippet: sqlText.length > SQL_SNIPPET_LEN ? sqlText.slice(0, SQL_SNIPPET_LEN) + '…' : sqlText,
+        rowCount: eventData?.row_count ?? 0,
+        success: isSuccess,
+      } : undefined
+      updateLastRunningToolStep(detail, isSuccess ? 'completed' : 'failed', toolId, sqlCard)
       // 图表/报告联动：成功且有产物时往对话里追加媒体卡片
       if (isSuccess && (chartOption || images.length || report)) {
         // 后端 AgentEvent.message_type 透传（TEXT/CHART/IMAGE/REPORT）；老版本后端未传时按 data 推断

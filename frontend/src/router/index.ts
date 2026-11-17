@@ -25,7 +25,7 @@ const router = createRouter({
     },
     {
       path: '/admin/appManage',
-      name: '项目管理',
+      name: '项目信息',
       component: () => import('@/pages/admin/AppManagePage.vue'),
     },
     {
@@ -54,9 +54,14 @@ const router = createRouter({
       component: () => import('@/pages/admin/PlatformResourcePage.vue'),
     },
     {
+      path: '/admin/platformConfig',
+      name: '平台配置',
+      component: () => import('@/pages/admin/PlatformConfigPage.vue'),
+    },
+    {
       // App owner 视角：先选项目，再在 Tool/Skill 两个 Tab 里开关授权
       path: '/app/grant',
-      name: '应用授权',
+      name: '项目授权',
       component: () => import('@/pages/app/AppGrantPage.vue'),
     },
     {

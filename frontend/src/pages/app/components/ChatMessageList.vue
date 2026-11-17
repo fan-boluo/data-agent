@@ -22,7 +22,7 @@
             <div v-if="item.type === 'text'" class="text-item" :class="{ 'text-interim': item.interim }">
               <MarkdownRenderer :content="item.text || ''" />
             </div>
-            <div v-else-if="item.type === 'step' && item.step" class="ai-step-inline" :class="'step-' + item.step.state">
+            <div v-else-if="item.type === 'step' && item.step && !item.step.sqlCard" class="ai-step-inline" :class="'step-' + item.step.state">
               <span class="step-icon">
                 <LoadingOutlined v-if="item.step.state === 'running'" spin />
                 <CheckCircleOutlined v-else-if="item.step.state === 'completed'" />
@@ -36,23 +36,23 @@
               <span class="tool-name">{{ item.toolResult.name }}</span>
               <span v-if="item.toolResult.detail" class="tool-detail">{{ item.toolResult.detail }}</span>
             </div>
-            <!-- SQL 卡片：穿插在 AI 流式回复中，点击跳到分析链路对应步骤 -->
+            <!-- SQL 工具步骤的卡片形态：与普通工具同为一条步骤，点击跳到分析链路对应工具卡片 -->
             <div
-              v-else-if="item.type === 'sql-card' && item.sqlCard"
+              v-else-if="item.type === 'step' && item.step && item.step.sqlCard"
               class="sql-card-message"
-              :class="{ 'sql-failed': !item.sqlCard.success }"
-              @click="$emit('jump-trace', item.sqlCard.stepId)"
+              :class="{ 'sql-failed': !item.step.sqlCard.success }"
+              @click="$emit('jump-trace', item.step.sqlCard.stepId)"
             >
               <span class="sql-card-icon">🗄️</span>
               <div class="sql-card-body">
                 <div class="sql-card-title">
                   SQL 查询
-                  <span v-if="item.sqlCard.success" class="sql-card-meta">
-                    {{ item.sqlCard.rowCount ?? 0 }} 行 · {{ item.sqlCard.durationMs ?? 0 }}ms
+                  <span v-if="item.step.sqlCard.success" class="sql-card-meta">
+                    {{ item.step.sqlCard.rowCount ?? 0 }} 行 · {{ item.step.sqlCard.durationMs ?? 0 }}ms
                   </span>
                   <span v-else class="sql-card-meta sql-card-meta-fail">执行失败</span>
                 </div>
-                <div class="sql-card-snippet">{{ item.sqlCard.snippet }}</div>
+                <div class="sql-card-snippet">{{ item.step.sqlCard.snippet }}</div>
               </div>
               <span class="sql-card-jump">→</span>
             </div>

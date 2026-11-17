@@ -88,7 +88,6 @@ import {
   LineChartOutlined,
   ExperimentOutlined,
   ApiOutlined,
-  SafetyCertificateOutlined,
   BarChartOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
@@ -108,16 +107,7 @@ const toggleCollapsed = () => {
 
 // 菜单选中态跟随路由（刷新/直接访问深链也能高亮）；进入子菜单页时自动展开父级
 const selectedKeys = ref<string[]>([route.path])
-const openKeys = ref<string[]>(route.path.startsWith('/admin/eval') ? ['/admin/eval'] : [])
-watch(
-  () => route.path,
-  (path) => {
-    selectedKeys.value = [path]
-    if (path.startsWith('/admin/eval') && !openKeys.value.includes('/admin/eval')) {
-      openKeys.value = [...openKeys.value, '/admin/eval']
-    }
-  },
-)
+const openKeys = ref<string[]>([])
 
 const originItems: MenuProps['items'] = [
   {
@@ -127,10 +117,24 @@ const originItems: MenuProps['items'] = [
     title: '我的项目',
   },
   {
-    key: '/admin/appManage',
+    // 项目层：项目信息维护 + 项目资源授权
+    key: '/admin/project',
     icon: () => h(AppstoreOutlined),
     label: '项目管理',
     title: '项目管理',
+    children: [
+      {
+        key: '/admin/appManage',
+        label: '项目信息',
+        title: '项目信息',
+      },
+      {
+        // 项目层能力授权：App owner 管理自己项目的 tool/skill 开关
+        key: '/app/grant',
+        label: '项目授权',
+        title: '项目授权',
+      },
+    ],
   },
   {
     key: '/admin/userManage',
@@ -139,18 +143,23 @@ const originItems: MenuProps['items'] = [
     title: '用户管理',
   },
   {
-    // 平台层资源：仅管理员可见，维护 tool/skill 全局总开关
-    key: '/admin/platformResource',
+    // 平台层：仅管理员可见，平台资源总开关与平台级配置
+    key: '/admin/platform',
     icon: () => h(ApiOutlined),
-    label: '平台资源',
-    title: '平台资源',
-  },
-  {
-    // 项目层能力授权：App owner 管理自己项目的 tool/skill 开关
-    key: '/app/grant',
-    icon: () => h(SafetyCertificateOutlined),
-    label: '应用授权',
-    title: '应用授权',
+    label: '平台管理',
+    title: '平台管理',
+    children: [
+      {
+        key: '/admin/platformResource',
+        label: '平台资源',
+        title: '平台资源',
+      },
+      {
+        key: '/admin/platformConfig',
+        label: '平台配置',
+        title: '平台配置',
+      },
+    ],
   },
   {
     key: '/admin/monitor',
@@ -184,19 +193,47 @@ const originItems: MenuProps['items'] = [
   },
 ]
 
-// 子菜单同样按路由前缀做权限过滤：子项全被过滤掉时父菜单一并隐藏
+// 子菜单项 → 父菜单 key 映射：路由变化时自动展开所属父级
+const parentKeyOf: Record<string, string> = {}
+const collectParentKeys = (items: MenuProps['items'], parentKey?: string) => {
+  for (const item of items || []) {
+    if (!item) continue
+    const key = String((item as any).key || '')
+    if (parentKey) parentKeyOf[key] = parentKey
+    const children = (item as any).children
+    if (Array.isArray(children)) collectParentKeys(children, key)
+  }
+}
+collectParentKeys(originItems)
+
+// 初始展开当前路由所属父级（刷新/深链直达子菜单页时）
+const initialParentKey = parentKeyOf[route.path]
+if (initialParentKey) openKeys.value = [initialParentKey]
+
+watch(
+  () => route.path,
+  (path) => {
+    selectedKeys.value = [path]
+    const parentKey = parentKeyOf[path]
+    if (parentKey && !openKeys.value.includes(parentKey)) {
+      openKeys.value = [...openKeys.value, parentKey]
+    }
+  },
+)
+
+// 按叶子项做权限过滤：/admin 页面仅管理员可见；子项全被过滤时父菜单一并隐藏
 const filterMenus = (items: MenuProps['items']): MenuProps['items'] => {
   const out: any[] = []
   for (const item of items || []) {
     if (!item) continue
     const key = 'key' in item ? String((item as any).key || '') : ''
-    if (key.startsWith('/admin') && loginUserStore.loginUser.userRole !== 'admin') continue
     const children = (item as any).children
     if (Array.isArray(children)) {
       const filtered = filterMenus(children)
       if (filtered?.length) out.push({ ...item, children: filtered })
       continue
     }
+    if (key.startsWith('/admin') && loginUserStore.loginUser.userRole !== 'admin') continue
     out.push(item)
   }
   return out
@@ -247,7 +284,7 @@ const doLogout = async () => {
 
 /* ---- 左侧边栏 ---- */
 .app-sider {
-  width: 160px;
+  width: 170px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
@@ -316,9 +353,9 @@ const doLogout = async () => {
   color: var(--text-secondary);
 }
 
-/* 子菜单减少缩进，避免长菜单文案被截断 */
+/* 子菜单加大左缩进，明确父子层级；缩小字号避免长文案被截断 */
 .sider-menu :deep(.ant-menu-submenu .ant-menu-item) {
-  padding-inline-start: 30px !important;
+  padding-inline-start: 46px !important;
   padding-inline-end: 8px !important;
   font-size: 13px;
 }

@@ -1,5 +1,9 @@
 <template>
-  <div class="tl-tool" :class="'tool-' + node.status">
+  <!-- SQL 类工具：复用 SQL 卡片（SQL + 结果预览），不再展示 sql/session_id 参数摘要 -->
+  <div v-if="isSqlTool" :id="'trace-step-' + node.id" class="trace-step-wrapper">
+    <AnalysisStepCard :step="sqlStep" />
+  </div>
+  <div v-else class="tl-tool" :class="'tool-' + node.status">
     <div class="tl-tool-head" @click="expanded = !expanded">
       <span class="tl-tool-indicator">
         <LoadingOutlined v-if="node.status === 'running'" spin />
@@ -35,6 +39,7 @@ import {
   CheckCircleOutlined, CloseCircleOutlined, DownOutlined, LoadingOutlined, RightOutlined,
 } from '@ant-design/icons-vue'
 import ToolResultMedia from '@/components/ToolResultMedia.vue'
+import AnalysisStepCard from '@/components/AnalysisStepCard.vue'
 import type { TraceToolNode } from '@/components/AnalysisTimeline.vue'
 
 const props = defineProps<{
@@ -43,6 +48,23 @@ const props = defineProps<{
 }>()
 
 const expanded = ref(false)
+
+// SQL 类工具：Start 参数或 End 事件携带 sql 即按 SQL 卡片渲染
+const isSqlTool = computed(() => Boolean(props.node.sql || (props.node.args as any)?.sql))
+
+// 工具节点 → SQL 卡片入参（状态/耗时与工具生命周期一致）
+const sqlStep = computed(() => ({
+  id: props.node.id,
+  type: 'sql' as const,
+  title: 'SQL 查询',
+  status: props.node.status,
+  timestamp: props.node.startTs,
+  sql: props.node.sql || String((props.node.args as any)?.sql || ''),
+  rowCount: props.node.rowCount,
+  durationMs: props.node.durationMs,
+  rowsPreview: props.node.rowsPreview || [],
+  error: props.node.error,
+}))
 
 // 详情里的完整参数（缩进美化）
 const argsJson = computed(() => {
@@ -55,6 +77,9 @@ const argsJson = computed(() => {
 </script>
 
 <style scoped>
+/* SQL 卡片容器：支持主对话卡片跳转滚动定位 */
+.trace-step-wrapper { scroll-margin-top: 8px; margin-bottom: 8px; }
+
 .tl-tool {
   border: 1px solid var(--border-light, #f0f0f0);
   border-radius: 6px;

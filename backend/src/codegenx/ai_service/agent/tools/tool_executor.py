@@ -269,7 +269,7 @@ class ToolExecutor(BaseComponent):
                            is_error=True, latency_ms=0.0, error_class=error_class)
             r = ToolResult(success=False, error_class=error_class,
                            message=before_ctx.message or "Tool blocked by hook")
-            await self._publish_tool_end(session_state, tool_name, tool_call_id, r, state=AgentState.FAILED)
+            await self._publish_tool_end(session_state, tool_name, tool_call_id, r, state=AgentState.FAILED, tool_input=tool_input)
             return r
 
         # 2. 查找工具（存在性已由守卫校验，这里只做兜底）
@@ -279,7 +279,7 @@ class ToolExecutor(BaseComponent):
             feed_tool_call(app_id=app_id, session_id=session_id, tool_name=tool_name or "unknown",
                            is_error=True, latency_ms=0.0, error_class="arg_invalid")
             r = ToolResult(success=False, message=f"工具「{tool_name}」不存在，本次调用未执行。")
-            await self._publish_tool_end(session_state, tool_name, tool_call_id, r, state=AgentState.FAILED)
+            await self._publish_tool_end(session_state, tool_name, tool_call_id, r, state=AgentState.FAILED, tool_input=tool_input)
             return r
 
         # 3. 熔断准入（守卫已对冷却期内的 open 态快速失败，这里只占半开探测名额）
@@ -290,7 +290,7 @@ class ToolExecutor(BaseComponent):
                         tool_name, app_id, session_id)
             r = ToolResult(success=False, error_class="circuit_open",
                            message=f"工具 {tool_name} 暂时不可用（熔断打开），请稍后重试或改用其他工具")
-            await self._publish_tool_end(session_state, tool_name, tool_call_id, r, state=AgentState.FAILED)
+            await self._publish_tool_end(session_state, tool_name, tool_call_id, r, state=AgentState.FAILED, tool_input=tool_input)
             return r
 
         # ── 找到工具，开始执行：先发 START ──
@@ -365,7 +365,7 @@ class ToolExecutor(BaseComponent):
 
         # ── 执行结束：发 END（成功或失败） ──
         state = AgentState.SUCCESS if result.success else AgentState.FAILED
-        await self._publish_tool_end(session_state, tool_name, tool_call_id, result, state=state)
+        await self._publish_tool_end(session_state, tool_name, tool_call_id, result, state=state, tool_input=tool_input)
 
         return result
 
@@ -395,8 +395,12 @@ class ToolExecutor(BaseComponent):
         session_state: RuntimeSessionState,
         tool_name: str, tool_call_id: str,
         result: ToolResult, state: AgentState,
+        tool_input: dict | None = None,
     ) -> None:
-        """工具执行结束事件（前端感知"工具执行完毕，成功/失败"）。"""
+        """工具执行结束事件（前端感知"工具执行完毕，成功/失败"）。
+
+        SQL 类工具额外携带 sql/row_count/rows_preview，前端据此把工具节点渲染成 SQL 卡片。
+        """
         try:
             from codegenx.ai_service.system_app import get_app
             from codegenx.ai_service.agent.agent_schema import MessageType
@@ -418,6 +422,12 @@ class ToolExecutor(BaseComponent):
                 "images": images,
                 "report": report,
             }
+            # SQL 卡片数据：仅 SQL 类工具（入参含 sql）附加，预览行取自 extras，不进 LLM 上下文
+            sql = str((tool_input or {}).get("sql") or "")
+            if sql:
+                data["sql"] = sql
+                data["row_count"] = int(extras.get("row_count") or 0)
+                data["rows_preview"] = extras.get("rows_preview") or []
             # 消息类型推断：报告 > 交互式图表 > 普通图片 > 纯文本
             if not result.success:
                 message_type = MessageType.TEXT

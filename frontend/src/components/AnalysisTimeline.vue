@@ -98,6 +98,10 @@ export interface TraceToolNode {
   // ECharts 配置（message_type=CHART 的工具产物）
   chartOption?: Record<string, any> | null
   error?: string
+  // SQL 类工具卡片数据（ToolExecutionEnd 携带）：ToolNodeItem 据此渲染 SQL 卡片而非参数摘要
+  sql?: string
+  rowCount?: number
+  rowsPreview?: Record<string, any>[]
 }
 
 export type TraceTaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed'

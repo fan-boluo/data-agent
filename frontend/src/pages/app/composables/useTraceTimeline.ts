@@ -192,10 +192,10 @@ export function useTraceTimeline(sessionId: Ref<string>, chatWidth: Ref<number>)
     else if (currentTaskNodeId.value === node.id) currentTaskNodeId.value = ''
   }
 
-  // 工具调用节点：事件 task_id 优先归到对应任务，否则挂进行中任务/turn 顶层
-  const addToolNode = (toolId: string, name: string, args: any, taskId?: number) => {
+  // 工具调用节点：事件 task_id 优先归到对应任务，否则挂进行中任务/turn 顶层；返回节点 id 供主对话卡片跳转定位
+  const addToolNode = (toolId: string, name: string, args: any, taskId?: number): string => {
     const turn = currentTraceTurn.value
-    if (!turn) return
+    if (!turn) return ''
     const node: TraceToolNode = {
       kind: 'tool', id: genTraceStepId(), toolId, name,
       argsSummary: summarizeArgs(args), args,
@@ -205,9 +205,10 @@ export function useTraceTimeline(sessionId: Ref<string>, chatWidth: Ref<number>)
       ?? (currentTaskNodeId.value ? findTimelineNodeById(currentTaskNodeId.value) : undefined)
     if (anchor && anchor.kind === 'task') anchor.children.push(node)
     else turn.nodes.push(node)
+    return node.id
   }
 
-  // 工具执行结束：按 tool_id 回填状态/耗时/展示元数据（render/images/report）
+  // 工具执行结束：按 tool_id 回填状态/耗时/展示元数据（render/images/report，SQL 工具附卡片数据）；返回节点 id
   const completeToolNode = (
     toolId: string, name: string, success: boolean,
     meta: {
@@ -216,15 +217,18 @@ export function useTraceTimeline(sessionId: Ref<string>, chatWidth: Ref<number>)
       report?: ToolReportMeta | null
       chartOption?: Record<string, any> | null
       error?: string
+      sql?: string
+      rowCount?: number
+      rowsPreview?: Record<string, any>[]
     },
-  ) => {
+  ): string => {
     let node = toolId ? findToolNode(toolId) : undefined
     if (!node && currentTraceTurn.value) {
       // Start 事件丢失时兜底补一个已结束节点
       node = { kind: 'tool', id: genTraceStepId(), toolId, name, argsSummary: '', status: 'running', startTs: Date.now() }
       currentTraceTurn.value.nodes.push(node)
     }
-    if (!node) return
+    if (!node) return ''
     node.status = success ? 'completed' : 'failed'
     node.durationMs = Date.now() - node.startTs
     if (meta.render) node.render = meta.render
@@ -232,6 +236,11 @@ export function useTraceTimeline(sessionId: Ref<string>, chatWidth: Ref<number>)
     if (meta.report) node.report = meta.report
     if (meta.chartOption) node.chartOption = meta.chartOption
     if (!success && meta.error) node.error = meta.error
+    // SQL 卡片数据：ToolNodeItem 据此把工具节点渲染成 SQL 卡片（SQL + 结果预览）
+    if (meta.sql) node.sql = meta.sql
+    if (meta.rowCount != null) node.rowCount = meta.rowCount
+    if (meta.rowsPreview) node.rowsPreview = meta.rowsPreview
+    return node.id
   }
 
   // think 节点：思考阶段入时间线（置灰展示）

@@ -1,6 +1,14 @@
 import { ref, type Ref } from 'vue'
 import type { ToolReportMeta } from '@/components/AnalysisTimeline.vue'
-import type { AnalysisStep } from './useTraceTimeline'
+
+// 主对话 SQL 卡片（SQL 工具步骤的卡片形态）：stepId 关联分析链路工具节点，点击可跳转定位
+export interface SqlCardInfo {
+  stepId: string
+  snippet: string
+  rowCount?: number
+  durationMs?: number
+  success: boolean
+}
 
 export interface AiStep {
   eventType: string
@@ -9,17 +17,17 @@ export interface AiStep {
   state: 'running' | 'completed' | 'failed'
   timestamp: number
   toolId?: string
+  // SQL 类工具：步骤以 SQL 卡片渲染，不再单独追加 sql-card 条目
+  sqlCard?: SqlCardInfo
 }
 
 export interface ItemEntry {
-  type: 'text' | 'step' | 'tool' | 'sql-card' | 'media'
+  type: 'text' | 'step' | 'tool' | 'media'
   text?: string
   // think/中间过程文本置灰，最终答复（RequestCompleted）恢复正常颜色
   interim?: boolean
   step?: AiStep
   toolResult?: { name: string; detail: string }
-  // sql-card：与分析链路 step.id 关联，点击可跳转定位
-  sqlCard?: { stepId: string; snippet: string; rowCount?: number; durationMs?: number; success: boolean }
   // media：工具产物联动（CHART=ECharts 交互渲染；IMAGE=普通图片；REPORT=报告查看/下载）
   media?: {
     images: string[]
@@ -41,10 +49,10 @@ export interface MessageItem {
 }
 
 // SQL 卡片摘要截断长度
-const SQL_SNIPPET_LEN = 80
+export const SQL_SNIPPET_LEN = 80
 
 /**
- * 对话消息列表状态与流式渲染操作（items/step/sql-card/media 的增改）。
+ * 对话消息列表状态与流式渲染操作（items/step/media 的增改）。
  * activeGenerationMessageIndex 由页面创建并传入，与流处理域共享"当前生成中消息"的定位。
  */
 export function useChatMessages(activeGenerationMessageIndex: Ref<number | null>) {
@@ -82,7 +90,7 @@ export function useChatMessages(activeGenerationMessageIndex: Ref<number | null>
     scrollToBottom()
   }
 
-  const updateLastRunningToolStep = (detail: string, state: AiStep['state'], toolId?: string) => {
+  const updateLastRunningToolStep = (detail: string, state: AiStep['state'], toolId?: string, sqlCard?: SqlCardInfo) => {
     const targetMessage = getMessageAt(activeGenerationMessageIndex.value ?? -1)
     if (!targetMessage?.steps) return
     const steps = targetMessage.steps
@@ -93,6 +101,11 @@ export function useChatMessages(activeGenerationMessageIndex: Ref<number | null>
         if (toolId && s.toolId && s.toolId !== toolId) continue
         s.state = state
         s.detail = detail
+        // SQL 工具：步骤切换为卡片形态，耗时由步骤开始时间计算
+        if (sqlCard) {
+          sqlCard.durationMs = Date.now() - s.timestamp
+          s.sqlCard = sqlCard
+        }
         scrollToBottom()
         return
       }
@@ -121,26 +134,6 @@ export function useChatMessages(activeGenerationMessageIndex: Ref<number | null>
     if (!targetMessage) return
     if (!targetMessage.items) targetMessage.items = []
     targetMessage.items.push({ type: 'media', media: { images, report, messageType, chartOption } })
-    scrollToBottom()
-  }
-
-  // 追加 SQL 卡片到当前生成中的 AI 消息 items 末尾，按时间穿插在 text/step/tool 之间
-  const appendSqlCardItem = (step: AnalysisStep) => {
-    const targetMessage = getMessageAt(activeGenerationMessageIndex.value ?? -1)
-    if (!targetMessage) return
-    if (!targetMessage.items) targetMessage.items = []
-    const sql = step.sql || ''
-    const snippet = sql.length > SQL_SNIPPET_LEN ? sql.slice(0, SQL_SNIPPET_LEN) + '…' : sql
-    targetMessage.items.push({
-      type: 'sql-card',
-      sqlCard: {
-        stepId: step.id,
-        snippet,
-        rowCount: step.rowCount,
-        durationMs: step.durationMs,
-        success: step.status === 'completed',
-      },
-    })
     scrollToBottom()
   }
 
@@ -190,7 +183,6 @@ export function useChatMessages(activeGenerationMessageIndex: Ref<number | null>
     updateLastRunningToolStep,
     failAllRunningToolSteps,
     appendMediaItem,
-    appendSqlCardItem,
     finalizeFinalAnswer,
     markMessageError,
     resetMessages,

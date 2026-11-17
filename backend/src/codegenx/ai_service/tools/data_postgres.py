@@ -99,8 +99,8 @@ class ExecutePostgresqlTool(BaseTool):
         row_count = len(rows)
 
         output = f"查询结果（共 {row_count} 行）:\n" + format_rows(rows)
-        # extras.rows_preview 供分析链路 hook 提取展示（前 10 行原始 dict，不进 LLM 上下文）
-        extras = {"rows_preview": rows[:10]} if rows else {}
+        # extras.rows_preview/row_count 供工具结束事件携带 SQL 卡片数据（前 10 行原始 dict，不进 LLM 上下文）
+        extras = {"rows_preview": rows[:10], "row_count": row_count} if rows else {"row_count": 0}
         return ToolResult(success=True, data=output, render=f"SQL 执行成功（{row_count} 行）", extras=extras)
 
 

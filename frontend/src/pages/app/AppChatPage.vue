@@ -307,6 +307,7 @@
       <ChatApprovalPanel
         v-if="pendingApproval"
         :pending-approval="pendingApproval"
+        :pending-count="pendingCount"
         :submitting="approvalSubmitting"
         @resolve="resolveApproval"
       />
@@ -481,7 +482,7 @@ const { messages, messagesContainer } = chatMsgs
 const { sessionHistoryVisible, sessionList, loadingSessionHistory, createNewSession, toggleSessionHistory, loadSession } = chatSessions
 const { chatTab, activeTraceTurns, activeAnalysisTrace, jumpToTraceStep } = timeline
 const { tasks } = taskBoard
-const { pendingApproval, approvalSubmitting, resolveApproval } = approval
+const { pendingApproval, pendingCount, approvalSubmitting, resolveApproval } = approval
 const { userInput, datasets, currentDb } = chatInput
 const { selectedElementInfo, clearSelectedElement } = elementSelection
 const {

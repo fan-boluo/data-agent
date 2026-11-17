@@ -9,10 +9,12 @@
       </span>
       <code class="approval-tool">{{ pendingApproval.toolName }}</code>
     </div>
+    <!-- 并行工具调用会产生多条审批，逐条处理，避免遗漏导致超时自动拒绝 -->
+    <div v-if="pendingCount > 1" class="approval-row approval-queue">共 {{ pendingCount }} 条待审批，处理完本条自动展示下一条</div>
     <div v-if="pendingApproval.title" class="approval-row">{{ pendingApproval.title }}</div>
     <pre v-if="pendingApproval.sql" class="approval-sql">{{ pendingApproval.sql }}</pre>
     <div class="approval-foot">
-      <span class="approval-tip">超时（{{ pendingApproval.timeoutSeconds }}s）未处理将自动拒绝</span>
+      <span class="approval-tip">超时（{{ Math.round(pendingApproval.timeoutSeconds / 60) }} 分钟）未处理将自动拒绝</span>
       <div class="approval-actions">
         <a-button size="small" danger :loading="submitting" @click="$emit('resolve', false)">拒绝</a-button>
         <a-button size="small" type="primary" :loading="submitting" @click="$emit('resolve', true)">允许执行</a-button>
@@ -26,10 +28,11 @@ import { ExclamationCircleOutlined } from '@ant-design/icons-vue'
 import type { PendingApproval } from '../composables/useApproval'
 
 // 审批结果上抛，由页面调用 useApproval.resolveApproval
-defineProps<{
+withDefaults(defineProps<{
   pendingApproval: PendingApproval
   submitting: boolean
-}>()
+  pendingCount?: number
+}>(), { pendingCount: 1 })
 
 defineEmits<{
   (e: 'resolve', approved: boolean): void

@@ -46,6 +46,7 @@ services:
       - "${APP_PORT:-8456}:8456"             # 直接暴露 API（Swagger /docs、/metrics 便于演示）
     volumes:
       - dataagent_data:/data     # 看板 JSON / 会话快照 / chat_message 落盘
+      - ./.data:/app/.data       # 用户工作区（代码/产物/会话），直接挂宿主机目录，重建容器不丢文件
     networks:
       - dataagent-net
     healthcheck:

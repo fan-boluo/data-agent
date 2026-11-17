@@ -533,12 +533,12 @@ class EvalConfig(Base):
 class HitlConfig(Base):
     """Human-in-the-loop 审批闸门（P0-3：高风险工具调用执行前挂起等人工确认）。"""
     enabled: bool = True                    # 总开关；关闭则所有调用直接放行
-    timeout_seconds: float = Field(default=300.0)  # 超时未处理自动拒绝（防止请求永久挂起）
+    timeout_seconds: float = Field(default=1800.0)  # 超时未处理自动拒绝（30 分钟，防止请求永久挂起）
     auto_approve: bool = Field(default=False)      # 评测/压测重放可打开，避免阻塞等人
     require_write: bool = True              # 写文件/写 SQL/执行命令需审批
     require_cross_schema: bool = True       # 访问当前数据集之外的 schema 需审批
     require_export: bool = True             # 结果落盘/导出需审批
-    require_full_scan: bool = True          # 无 WHERE 无 LIMIT 或 LIMIT 超阈值需审批
+    require_full_scan: bool = False         # 无 WHERE 无 LIMIT 或 LIMIT 超阈值需审批（默认关：小表全扫属正常分析）
     max_scan_rows: int = Field(default=1_000_000)  # LIMIT 行数阈值（超过视为大范围扫描）
 
 
