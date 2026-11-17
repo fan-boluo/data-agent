@@ -1,0 +1,594 @@
+#appChatPage.ide-layout {
+  height: 100%;
+  display: flex;
+  overflow: hidden;
+  background: var(--bg-page);
+  gap: 4px;
+  padding: 4px;
+}
+
+/* ====== Activity Bar ====== */
+.activity-bar {
+  width: 48px;
+  min-width: 48px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: center;
+  background: var(--bg-page);
+  border-right: 1px solid var(--border-light);
+  padding: 8px 0;
+}
+
+.activity-bar-top,
+.activity-bar-bottom {
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.activity-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-btn);
+  color: var(--text-muted);
+  font-size: 18px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  position: relative;
+}
+
+.activity-icon:hover {
+  color: var(--accent-primary);
+  background: var(--accent-primary-light);
+}
+
+.activity-icon.active {
+  color: var(--accent-primary);
+  background: var(--accent-primary-light);
+}
+
+.activity-icon.active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 24px;
+  background: var(--accent-primary);
+  border-radius: 0 2px 2px 0;
+}
+
+/* ====== Side Panel ====== */
+.side-panel {
+  min-width: 200px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-page);
+  border-right: 1px solid var(--border-light);
+  overflow: hidden;
+}
+
+.side-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  height: 36px;
+  border-bottom: 1px solid var(--border-light);
+  flex-shrink: 0;
+}
+
+.side-panel-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.side-panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.side-panel-actions :deep(.ant-btn-text) {
+  color: var(--text-muted);
+}
+
+.side-panel-actions :deep(.ant-btn-text:hover) {
+  color: var(--accent-primary);
+  background: var(--accent-primary-light);
+}
+.side-panel-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 0;
+}
+
+.sidebar-loading {
+  display: flex;
+  justify-content: center;
+  padding: 24px;
+}
+
+.sidebar-empty {
+  display: flex;
+  justify-content: center;
+  padding: 24px 16px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.sidebar-empty p {
+  margin: 0;
+}
+
+.sidebar-tree {
+  padding: 4px 8px;
+}
+
+.sidebar-tree :deep(.ant-tree-node-content-wrapper) {
+  font-size: 13px;
+  border-radius: var(--radius-btn);
+  padding: 5px 8px;
+  margin: 2px 0;
+  transition: all 0.15s ease;
+}
+
+.sidebar-tree :deep(.ant-tree-node-content-wrapper:hover) {
+  background: var(--accent-primary-light);
+}
+
+.sidebar-tree :deep(.ant-tree-node-selected) {
+  background: var(--accent-primary-light) !important;
+}
+
+/* ====== Resizer (vertical) ====== */
+.resizer {
+  width: 4px;
+  flex-shrink: 0;
+  cursor: col-resize;
+  background: transparent;
+  transition: background 0.2s;
+  position: relative;
+  z-index: 10;
+}
+
+.resizer:hover,
+.resizer:active {
+  background: var(--accent-primary);
+}
+
+/* ====== Center Column ====== */
+.center-column {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+/* ====== Center Work Area (Editor) ====== */
+.center-work-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-card);
+  overflow: hidden;
+}
+
+.file-tab-bar {
+  display: flex;
+  align-items: center;
+  height: 36px;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-light);
+  flex-shrink: 0;
+}
+
+.file-tab-bar-left {
+  display: flex;
+  align-items: center;
+  overflow-x: auto;
+  flex: 1;
+  height: 100%;
+}
+
+.file-tab-bar-left::-webkit-scrollbar {
+  height: 0;
+}
+
+.file-tab-bar-right {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px;
+  flex-shrink: 0;
+  border-left: 1px solid var(--border-light);
+  height: 100%;
+}
+
+.file-tab {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px;
+  height: 100%;
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-right: 1px solid var(--border-light);
+  border-radius: var(--radius-btn) var(--radius-btn) 0 0;
+  transition: background 0.15s;
+  user-select: none;
+}
+
+.file-tab:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.file-tab.active {
+  background: var(--accent-primary-light);
+  color: var(--accent-primary);
+  font-weight: 500;
+}
+
+.file-tab.active::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--accent-primary);
+}
+
+.file-tab-dirty {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent-primary, #2563eb);
+  flex-shrink: 0;
+}
+
+.file-tab-name {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.file-tab-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  font-size: 10px;
+  opacity: 0;
+  transition: opacity 0.1s, background 0.1s;
+}
+
+.file-tab:hover .file-tab-close {
+  opacity: 0.6;
+}
+
+.file-tab-close:hover {
+  opacity: 1 !important;
+  background: rgba(239, 68, 68, 0.15);
+  color: #EF4444;
+}
+
+/* ====== Editor Area ====== */
+.editor-area {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+}
+
+.monaco-editor-container {
+  flex: 1;
+  height: 100%;
+}
+
+.editor-wrapper {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+}
+
+.editor-loading-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: var(--bg-surface);
+  color: var(--text-muted);
+}
+
+.center-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--text-muted);
+}
+
+.center-empty-icon {
+  font-size: 48px;
+  color: var(--border-strong);
+}
+
+.center-empty-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.center-empty-hint {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.center-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 100%;
+  color: var(--text-muted);
+}
+
+/* ====== Resizer (horizontal, editor ↔ output) ====== */
+.resizer-horizontal {
+  height: 4px;
+  flex-shrink: 0;
+  cursor: row-resize;
+  background: transparent;
+  transition: background 0.2s;
+  position: relative;
+  z-index: 10;
+}
+
+.resizer-horizontal:hover,
+.resizer-horizontal:active {
+  background: var(--accent-primary);
+}
+
+/* ====== Output Panel ====== */
+.output-panel {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-card);
+  overflow: hidden;
+}
+
+.output-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  background: var(--bg-subtle);
+  border-bottom: 1px solid var(--border-light);
+}
+
+.output-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.output-header :deep(.ant-btn-text) {
+  color: var(--text-muted);
+  font-size: 12px;
+  border-radius: var(--radius-btn);
+}
+
+.output-header :deep(.ant-btn-text:hover) {
+  color: var(--accent-primary);
+  background: var(--accent-primary-light);
+}
+
+.output-content {
+  flex: 1;
+  overflow-y: auto;
+  background: var(--bg-page);
+  padding: 10px 12px;
+  font-family: 'SF Mono', 'Fira Code', Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.output-empty {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.output-line {
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.output-stdout {
+  color: var(--text-primary);
+}
+
+.output-stderr {
+  color: #ef4444;
+}
+
+.output-system {
+  color: var(--accent-primary);
+}
+
+/* ====== Right Chat Panel ====== */
+.right-chat-panel {
+  min-width: 260px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-card);
+  overflow: hidden;
+}
+
+.chat-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-light);
+  background: var(--bg-surface);
+  flex-shrink: 0;
+  position: relative;
+}
+.chat-header-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.chat-header-actions {
+  display: flex;
+  gap: 2px;
+}
+
+/* 让 messages-container 占满对话内容区 */
+.messages-container {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+  scroll-behavior: smooth;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* ====== Selected Element Alert ====== */
+.selected-element-alert {
+  margin: 0 16px;
+}
+
+.element-tag {
+  font-weight: 600;
+  color: var(--accent-primary);
+}
+
+.element-id {
+  color: var(--text-secondary);
+  margin-left: 4px;
+}
+
+.element-class {
+  color: var(--text-muted);
+  margin-left: 4px;
+}
+
+.element-selector-code {
+  background: var(--bg-subtle);
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 12px;
+}
+
+/* ====== Responsive ====== */
+@media (max-width: 1280px) {
+  .right-chat-panel {
+    width: 320px;
+    min-width: 280px;
+  }
+}
+
+@media (max-width: 1024px) {
+  .side-panel {
+    width: 48px;
+    min-width: 48px;
+  }
+  .side-panel .side-panel-title span,
+  .side-panel .side-panel-actions {
+    display: none;
+  }
+  .side-panel-header {
+    justify-content: center;
+    padding: 0 4px;
+  }
+  .right-chat-panel {
+    width: 300px;
+    min-width: 260px;
+  }
+}
+
+/* ---- 右栏头部 Tab（AI助手 | 分析链路）---- */
+.chat-header-tabs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.chat-header-tab {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-muted, #8c8c8c);
+  cursor: pointer;
+  transition: color 0.2s;
+  user-select: none;
+}
+.chat-header-tab:hover { color: var(--text-primary, #262626); }
+.chat-header-tab.active { color: var(--text-primary, #262626); font-weight: 600; }
+.chat-header-tab-divider { color: var(--border-color, #d9d9d9); user-select: none; }
+
+/* 对话/分析链路内容区：撑满头部与输入框之间的空间 */
+.chat-content,
+.trace-container {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.trace-container { padding: 8px; overflow-y: auto; }
+
+.trace-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 20px;
+  color: #8c8c8c;
+  text-align: center;
+}
+.trace-empty-icon { font-size: 36px; margin-bottom: 12px; }
+.trace-empty-title { font-size: 14px; font-weight: 500; margin: 0 0 4px; color: #595959; }
+.trace-empty-hint { font-size: 12px; margin: 0; line-height: 1.6; }
+
+@media (max-width: 768px) {
+  #appChatPage.ide-layout {
+    min-width: 768px;
+    overflow-x: auto;
+  }
+}

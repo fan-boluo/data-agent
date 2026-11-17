@@ -15,6 +15,9 @@ from codegenx.ai_service.utils.config import AgentConfig
 from codegenx.ai_service.system_app import get_app
 from codegenx.ai_service.trace import report_context_usage, start_span
 from codegenx.ai_service.agent.tools.tool_handler import get_tool_registry
+# 输出护轨注册（P1-3）：import 即挂 AFTER_LLM_INVOKE（PII 脱敏/无依据数字/越权表名）
+from codegenx.ai_service.guardrail import output_guardrail  # noqa: F401
+from codegenx.resource_service.store import get_disabled_tool_codes
 from shared import log
 from codegenx.ai_service.agent.agents.agent import Agent, AgentMessage
 from codegenx.ai_service.context.common_context import CommonContext
@@ -28,8 +31,6 @@ class BaseReActAgent(Agent):
     """
     一个基础思考，行动，验证agent
     """
-
-
     def __init__(
             self,
             context: CommonContext | None = None,
@@ -107,22 +108,23 @@ class BaseReActAgent(Agent):
         registry.register_spec(spec)
 
 
-    def _resolve_tool_catalog(self) -> list[dict]:
-        """按 config.json agents[].tools 解析 function-calling 工具目录。
+    async def _resolve_tool_catalog(self, app_id: str) -> list[dict]:
+        """按 app_id 可用工具集 + config agents[].tools 白名单解析工具目录。
 
-        - 未配置 tools（None）→ 全量开放：构建全部注册工具（lead agent 统一工具面，
-          含 dispatch_agent 编排工具与业务工具，excluded 已在注册时剔除）；
-        - 空列表 → 不启用工具（纯文本决策链路）；
-        - 非空白名单 → 仅构建白名单内工具（执行型 agent 最小授权）。
-        解析失败（如独立调试场景无 SystemApp）时降级为无工具，不阻断 agent 构建。
+        - 工具可用性来源：agent.tool（平台总开关）+ agent.app_tool（项目授权），
+          agent 每次准备时读取，管理员开关后下一轮即生效；
+        - 未配置 tools（None）→ 该 app 可用工具全部开放（lead 统一工具面）；
+        - 空列表 → 不启用工具；
+        - 非空白名单 → 仅构建白名单内（执行型 agent 最小授权）。
+        配置表不可用时降级为不额外过滤（fail open），避免阻断正常分析。
         """
         allowlist = self.agent_config.tools
         try:
-            if allowlist is None:
-                return get_tool_registry().build_tool()
-            if not allowlist:
+            registry = get_tool_registry()
+            if allowlist is not None and not allowlist:
                 return []
-            return get_tool_registry().build_agent_tools(allowlist)
+            disabled = await get_disabled_tool_codes(app_id)
+            return registry.build_tools(allowlist, disabled)
         except Exception as exc:
             log.warning("{} 工具目录解析失败，降级为无工具: {}", self.agent_name, exc)
             return []
@@ -148,8 +150,9 @@ class BaseReActAgent(Agent):
         system prompt 不在这里构建：每次调 LLM 前由
         CompactionService.token_budget 统一做分区预算后再渲染。
         """
-        # 工具目录与执行器：config.json agents[].tools 白名单非空才启用 function calling
-        self.tools = self._resolve_tool_catalog()
+        # 工具目录与执行器：按 app 可用工具集 + config agents[].tools 白名单
+        app_id = str(self._context.app_id or "main")
+        self.tools = await self._resolve_tool_catalog(app_id)
         # 压缩源保持原始目录：token_budget 的 tools 瘦身仅当次 payload 生效
         # （self.tools 会被写回瘦身结果供本次 LLM 调用），下 step 从原始目录重算，
         # 避免描述截断跨 step 累积、预算恢复后也无法还原
@@ -164,7 +167,20 @@ class BaseReActAgent(Agent):
 
     async def _prepare_prompt_params(self,request:UserAIRequest) -> dict:
         """ 在build prompt之前，子类各自准备 """
-        return {}
+        # skill 目录注入（P1-4）：profile.skill_prompt 声明 {{skill_prompt}} 占位的 agent
+        # （如 leader）按 config agents[].skills allowlist 渲染；未声明占位的 agent 不受影响
+        params: dict[str, Any] = {}
+        with suppress(Exception):
+            from codegenx.ai_service.skill.skill_loader import get_skill_manager
+            from codegenx.resource_service.store import get_disabled_skill_codes
+
+            # 项目侧技能授权：平台总开关关闭 / 项目关闭的 skill 不进入目录
+            app_id = str(self._context.app_id or "main")
+            disabled = await get_disabled_skill_codes(app_id) or set()
+            params["skill_prompt"] = get_skill_manager().build_prompt(
+                getattr(self.agent_config, "skills", None), disabled
+            )
+        return params
 
     def _refresh_step_params(self, request_id: str) -> None:
         """每 step 刷新易变分区（看板随工具调用变化），静态分区不重算。"""
@@ -475,6 +491,8 @@ class BaseReActAgent(Agent):
             caller = str(agent_message.sender or "user")
             observation.sender = self.agent_name
             observation.recipient = caller
+            # verify 只在步数耗尽/未产出下一跳时失败：工具与 LLM 故障已在调用链路
+            # 自行重试并回填对话，这里只组装失败信封，不做二次归因或外重试
             if caller == "user":
                 observation.result = "执行失败，请稍后重试"
                 observation.task_id = None

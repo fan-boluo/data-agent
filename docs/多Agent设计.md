@@ -57,6 +57,9 @@ backend/src/codegenx/ai_service/
 | **planner** | 规划：拆解任务 + 登记看板 | 仅 task_* 工具（看板管理） | ❌ 任务自包含 |
 | **data_explore** | 数据探索：查询 + 统计 | execute_sql / describe_table_stats / list_tables / describe_table / sample_rows | ❌ 任务自包含 |
 | **csv_explore** | CSV 探索：文件读取 + 统计 | describe_csv / sample_csv_rows / describe_csv_stats / list_csv_files | ❌ 任务自包含 |
+| **reporter** | 报告：图表规划 + 报告生成 | plot_chart / generate_report / run_python 等，skills=plot/report | ❌ 任务自包含 |
+
+> 运行时可派发清单是动态的：被管理员全局停用、或模型链全部熔断打开的智能体不会出现在 leader 的可用清单中（见 §6 可用性拦截）。
 
 ### 注册机制
 
@@ -69,7 +72,13 @@ backend/src/codegenx/ai_service/
 1. `cls.resolve_agent_config()` — 按 `cls.name` 从 config.json 匹配配置（模型链、max_steps、tools 白名单）
 2. `cls.register()` — 构建 `AgentSpec`（id / role / name / desc / cls）注册到 `AgentRegistry`
 
-config.json 中 `agents[].tools` 白名单决定该智能体能用哪些工具，由 `ToolRegistry.build_agent_tools(allowlist)` 过滤产出 function-calling 目录。
+config.json 中 `agents[].tools` 白名单决定该智能体能用哪些工具，由 `ToolRegistry.build_tools(allowlist, disabled)` 过滤产出 function-calling 目录：先剔除运行时不可用工具（平台总开关 / 项目授权，见《数据分析工具技能设计.md》资源管理节），再按白名单裁剪。
+
+### 平台智能体管理（全局启停 + LLM 可用性）
+
+- 表 `agent.agent`（init/params_schema.sql）只持久化**手动总开关** `is_enabled` 与备注，编码对应 `AgentSpec.name` / config.json `agents[].name`；只做全局层，无 app 级授权。
+- **实际可用 = is_enabled ∧ 模型链存在未熔断模型**：LLM 可用性由 `resource_service/agents.py` 实时读取各模型 `CircuitBreaker.is_open()` 计算，不落库；模型链全部熔断打开即自动下线，冷却结束自动恢复，无需人工干预。
+- 管理入口：平台资源页 Agent 管理 Tab（`GET/POST /params/agent/*`，仅管理员）；不可用（模型链全熔断）的智能体前端禁止开启，允许随时停用。
 
 ---
 
@@ -150,10 +159,13 @@ LeaderAgent.run(msg, session_state)
 
 ### 多子任务并行
 
-同一回复中多次调用 `dispatch_agent` = 并行执行：
-- `dispatch_agent` 工具内部用 `asyncio.create_task` 并行启动子智能体
-- 通过 `asyncio.gather` 等所有子智能体完成后，将各结果汇总为一条 tool result 回填
-- leader 在下一次 think 时一次看到所有子任务结果
+同一回复中多次调用 `dispatch_agent` = 并行执行，由 `ToolExecutor` 统一调度（工具内不做并行）：
+
+- `dispatch_tool_calls` 把所有 tool_calls 交给 `asyncio.gather` 并发执行，`dispatch_agent` 额外受 `agent_slots`（`multi_agents.max_parallel`）限流；
+- 普通工具受 `tool_slots`（`tools.max_concurrency`）限流；`dispatch_agent` 只占 `agent_slots`、不占 `tool_slots`，避免同轮多个派发吃光工具席位导致子 agent 内部工具饥饿（嵌套死锁）；
+- 子 agent 内部工具走同一调度器，因此是"并行套并行"，嵌套深度恒为 1（子 agent 不能派子 agent）；
+- 结果按原 tool_calls 顺序回填为 tool 消息，leader 在下一次 think 时一次看到全部子任务结果（协议要求 assistant.tool_calls 与 tool 消息成批配对，故批级可见）；
+- `config.tools.execution_mode="sequential"` 可整体切换为串行执行，便于排障。
 
 ### 计划模式
 
@@ -181,16 +193,33 @@ LeaderAgent.run(msg, session_state)
 
 **执行流程**：
 1. `dispatch_agent` 工具收到调用
-2. 内部按 agent 名从 `AgentRegistry` 拿到 `AgentSpec` → `spec.cls()` 实例化（每调用新建实例，不缓存）
-3. 包装 `AgentMessage(sender="leader", recipient=目标, task=task)`
-4. `await 子智能体.run(msg, session_state)` 内联执行完整 ReAct 循环
-5. 子智能体返回终答跳（或执行失败的回传跳）
-6. 工具把子智能体结果作为 `ToolResult` 返回，leader 在下次 LLM 调用时看到
+2. **可用性拦截**：目标智能体被全局停用或模型链全部熔断打开时，直接返回 `ToolResult(success=False, error_class="agent_unavailable")`，leader 据此改派或自行处理
+3. 内部按 agent 名从 `AgentRegistry` 拿到 `AgentSpec` → `spec.cls(context=SubContext(...))` 实例化（每调用新建实例，不缓存）
+4. 包装 `AgentMessage(sender="leader", recipient=目标, task=task)`
+5. `await 子智能体.run(msg, session_state)` 内联执行完整 ReAct 循环
+6. 子智能体返回终答跳（或执行失败的回传跳）
+7. 工具把子智能体结果作为 `ToolResult` 返回，leader 在下次 LLM 调用时看到
+
+leader 的可用智能体清单（`agents_list_desc`）每轮实时构建，与被拦截口径一致：停用 / 全链熔断的子智能体不出现在清单中，LLM 不会看到不可派发的目标。
 
 ### 子智能体结果处理
 
 - **成功**：`ToolResult(success=True, data="执行结果文本")` — leader 看到后继续决策
-- **失败**：`ToolResult(success=False, message="执行失败：{reason}")` — leader 看到后可重试 / 换路 / 汇总时承认失败
+- **失败**：`ToolResult(success=False, message="执行失败：{reason}", error_class="subagent_failed")` — leader 看到后可重试 / 换路 / 汇总时承认失败
+
+### 子智能体生命周期与通知
+
+当前为**单向通信**（agent-as-tool 同步返回），子 agent 不主动向 leader 发消息：
+
+| 通道 | 时机 | 消费方 |
+|---|---|---|
+| tool result | 子 agent `run()` 返回 | leader 下一次 LLM 调用 |
+| `TOOL_EXECUTION_START` / `END` 事件（`tool_name="dispatch_agent"`） | 派发开始 / 结束 | 前端（SSE 实时展示） |
+| `activate_turn.active_sub_agents` | 派发开始登记、结束回填 `finished_at` / `success` / `message` | 运行态观测（看板 / 排障） |
+
+- `active_sub_agents` 的 key 为 `agent 名 + task_id/任务前缀`，支持同轮同 agent 多次派发的区分；
+- 该注册表只做观测，不参与调度决策；turn 结束随 `ActivateTurn` 一起丢弃；
+- 双向消息（mailbox / send-receive 队列）暂不引入：当前场景子任务都有终点、leader 需基于结果决策，agent-as-tool 足够；出现长时后台任务 / 跨请求任务时再升级。
 
 ---
 
@@ -231,13 +260,43 @@ LeaderAgent.run(msg, session_state)
 
 ---
 
-## 8. SessionContext（会话历史真相源）
+## 8. 上下文（Context）与运行时状态
+
+### 上下文类型层级
+
+```
+CommonContext（基类：session_id / app_id / user_id / db_name / system_prompt / chat_messages）
+├── SessionContext   ← leader 用：会话历史唯一真相源 + 摘要水位 + 快照/恢复
+└── SubContext       ← 子 agent 用：一次性工作区，随 run 生灭，无水位/快照，额外带 agent_name
+```
+
+- `RuntimeSessionState.context` 类型为 `CommonContext`，运行时为 `SessionContext`——会话真相源不属于某一个 agent；
+- `agent_name` 不在基类：leader 的归属在 `RuntimeSessionState.agent_name`，子 agent 的归属在 `SubContext.agent_name`；
+- 子 agent 的 `SubContext` 由 `dispatch_agent` 创建并按 `cls(context=sub_context)` 注入，压缩只作用自己的工作区，不触达会话真相源。
+
+### SessionContext（会话历史真相源）
 
 `SessionContext.chat_messages` 是整个 AI Service 的**会话历史唯一真相源**：
 
-- **写入点**：AutoPlanManager（用户消息 / assistant 终答）、dispatch_agent 内联执行（子智能体结果）、BaseReActAgent（LLM tool_calls + tool result）
+- **写入点**：AutoPlanManager（用户消息 / assistant 终答）、BaseReActAgent（LLM tool_calls + tool result）
 - **读取点**：leader 每轮 think 时从 SessionContext 取历史
 - **快照持久化**：turn 结束后 `save_turn_chat_message_snapshot` 写磁盘（Swap-out 后恢复的依据）
+
+### RuntimeSessionState 的职责边界
+
+`RuntimeSessionState` 是 **session 级任务调度容器**，只包含任务调度 + 两个业务对象：
+
+| 成员 | 定位 |
+|---|---|
+| `request_lock` / `pending_requests` / `active_tasks` / `worker_task` / `stop_signal` | 请求串行、任务生命周期、停止信号 |
+| `context` | 会话上下文（`CommonContext`，运行时为 `SessionContext`） |
+| `activate_turn` | 当前 turn 的请求级状态机 |
+
+`ActivateTurn` 是**请求级单例，不按 agent 拆分**：
+
+- `round_counter`（turn_id 落库与 SSE 轮次）、`state` / `started_at` / `finished_at`、`tool_call_counts`（工具配额）都是"一次用户请求"的语义，跨 agent 共享才是正确口径——一次请求的工具预算不该被子 agent 放大；
+- 子 agent 需要独立的是上下文（`SubContext`）、trace（派发 span 下挂子 span）与结果（tool result），都不在 turn 上；
+- 唯一的 agent 维度扩展是 `active_sub_agents`（观测注册表，见 §6）。
 
 ---
 
@@ -283,4 +342,5 @@ LeaderAgent.run(msg, session_state)
 | 版本 | 变化 | 原因 |
 |---|---|---|
 | v1.0（已退役） | 多跳接力路由（Supervisor → Dispatch → 执行 Agent → 回传 → 审查 → 终答） | 原型验证 |
-| v2.0（当前） | 单跳直通 + agent-as-tool：用户→leader→用户，子智能体内联为 tool result | 多跳路由引入太多复杂性（批信封 / 并行路由 / 审查框架 / orchestration_state），agent-as-tool 更简洁、更符合主流设计（Anthropic Task / OpenAI Agents SDK as_tool） |
+| v2.0 | 单跳直通 + agent-as-tool：用户→leader→用户，子智能体内联为 tool result | 多跳路由引入太多复杂性（批信封 / 并行路由 / 审查框架 / orchestration_state），agent-as-tool 更简洁、更符合主流设计（Anthropic Task / OpenAI Agents SDK as_tool） |
+| v2.1（当前） | 智能体全局管理：agent.agent 手动启停 + 模型链熔断可用性实时判定，leader 清单过滤 + dispatch 拦截 | 平台侧需要紧急下线/恢复某个智能体的能力，且模型故障时自动摘派，避免反复派发注定失败的子任务 |

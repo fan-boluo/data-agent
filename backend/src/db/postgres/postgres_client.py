@@ -101,7 +101,7 @@ async def shutdown_postgres_engine() -> None:
 
 
 # ===========================================================================
-# 记忆域连接池（memory.* + message.chat_message）
+# 记忆域连接池（agent.*：agent_memory / chat_message 等）
 # 与语义层分池：聊天写入与提炼 Worker 是高频短事务，独立池避免互相饿死。
 # ===========================================================================
 _memory_pool: asyncpg.Pool | None = None

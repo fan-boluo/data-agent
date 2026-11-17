@@ -80,6 +80,7 @@ class MonitorTurnSummary(CamelBaseModel):
     context_tokens: int = Field(default=0, alias="contextTokens")
     context_token_usage: int = Field(default=0, alias="contextTokenUsage")
     error_count: int = Field(default=0, alias="errorCount")
+    user_input: str = Field(default="", alias="userInput")
     started_at: datetime | None = Field(default=None, alias="startedAt")
     ended_at: datetime | None = Field(default=None, alias="endedAt")
     duration_ms: int = Field(default=0, alias="durationMs")

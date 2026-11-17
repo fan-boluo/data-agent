@@ -52,7 +52,7 @@ class MemoryFacade(BaseComponent):
 
             await get_memory_pool()
             await ensure_memory_schema()
-            log.info("记忆域 PostgreSQL（memory/message schema）已就绪")
+            log.info("记忆域 PostgreSQL（agent schema）已就绪")
 
     async def load(
         self,

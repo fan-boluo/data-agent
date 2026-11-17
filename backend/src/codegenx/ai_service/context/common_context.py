@@ -21,8 +21,6 @@ class CommonContext(ABC):
     user_id: str = ""
     # 关联数据库名（leader _prepare_prompt_params 需要）
     db_name: str = ""
-    # 会话归属智能体
-    agent_name: str = ""
     # agent 的 system prompt（_prepare_agent 构建后写入）
     system_prompt: str = ""
     chat_messages: list[dict[str, Any]] = field(default_factory=list)

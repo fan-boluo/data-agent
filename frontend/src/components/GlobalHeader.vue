@@ -9,6 +9,7 @@
       <a-menu
         v-if="menuItems?.length"
         v-model:selectedKeys="selectedKeys"
+        v-model:openKeys="openKeys"
         mode="inline"
         :inline-collapsed="collapsed"
         :items="menuItems"
@@ -85,6 +86,9 @@ import {
   UserOutlined,
   DashboardOutlined,
   LineChartOutlined,
+  ExperimentOutlined,
+  ApiOutlined,
+  SafetyCertificateOutlined,
   BarChartOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
@@ -102,12 +106,16 @@ const toggleCollapsed = () => {
   localStorage.setItem(COLLAPSE_KEY, collapsed.value ? '1' : '0')
 }
 
-// 菜单选中态跟随路由（刷新/直接访问深链也能高亮）
+// 菜单选中态跟随路由（刷新/直接访问深链也能高亮）；进入子菜单页时自动展开父级
 const selectedKeys = ref<string[]>([route.path])
+const openKeys = ref<string[]>(route.path.startsWith('/admin/eval') ? ['/admin/eval'] : [])
 watch(
   () => route.path,
   (path) => {
     selectedKeys.value = [path]
+    if (path.startsWith('/admin/eval') && !openKeys.value.includes('/admin/eval')) {
+      openKeys.value = [...openKeys.value, '/admin/eval']
+    }
   },
 )
 
@@ -131,6 +139,20 @@ const originItems: MenuProps['items'] = [
     title: '用户管理',
   },
   {
+    // 平台层资源：仅管理员可见，维护 tool/skill 全局总开关
+    key: '/admin/platformResource',
+    icon: () => h(ApiOutlined),
+    label: '平台资源',
+    title: '平台资源',
+  },
+  {
+    // 项目层能力授权：App owner 管理自己项目的 tool/skill 开关
+    key: '/app/grant',
+    icon: () => h(SafetyCertificateOutlined),
+    label: '应用授权',
+    title: '应用授权',
+  },
+  {
     key: '/admin/monitor',
     icon: () => h(DashboardOutlined),
     label: '运行追踪',
@@ -142,18 +164,42 @@ const originItems: MenuProps['items'] = [
     label: '运行统计',
     title: '运行统计',
   },
+  {
+    key: '/admin/eval',
+    icon: () => h(ExperimentOutlined),
+    label: '运行评估',
+    title: '运行评估',
+    children: [
+      {
+        key: '/admin/eval/agent',
+        label: 'Agent运行评估',
+        title: 'Agent运行评估',
+      },
+      {
+        key: '/admin/eval/dataset',
+        label: '标准数据集评估',
+        title: '标准数据集评估',
+      },
+    ],
+  },
 ]
 
+// 子菜单同样按路由前缀做权限过滤：子项全被过滤掉时父菜单一并隐藏
 const filterMenus = (items: MenuProps['items']): MenuProps['items'] => {
-  if (!items) return []
-  return items.filter((item) => {
-    if (!item) return false
-    const key = 'key' in item ? (item as any).key : ''
-    if (key.startsWith('/admin')) {
-      return loginUserStore.loginUser.userRole === 'admin'
+  const out: any[] = []
+  for (const item of items || []) {
+    if (!item) continue
+    const key = 'key' in item ? String((item as any).key || '') : ''
+    if (key.startsWith('/admin') && loginUserStore.loginUser.userRole !== 'admin') continue
+    const children = (item as any).children
+    if (Array.isArray(children)) {
+      const filtered = filterMenus(children)
+      if (filtered?.length) out.push({ ...item, children: filtered })
+      continue
     }
-    return true
-  })
+    out.push(item)
+  }
+  return out
 }
 
 const menuItems = computed<MenuProps['items']>(() => filterMenus(originItems))
@@ -255,18 +301,30 @@ const doLogout = async () => {
   flex: 1;
   border-inline-end: none !important;
   background: transparent !important;
-  padding: 8px 10px;
+  padding: 8px;
   overflow-y: auto;
 }
 
 /* 竖排菜单项：胶囊选中态，收紧两侧留白 */
-.sider-menu :deep(.ant-menu-item) {
+.sider-menu :deep(.ant-menu-item),
+.sider-menu :deep(.ant-menu-submenu-title) {
   border-radius: var(--radius-btn);
   margin-block: 2px;
   margin-inline: 0;
-  padding-inline: 12px;
+  padding-inline: 10px;
   width: 100%;
   color: var(--text-secondary);
+}
+
+/* 子菜单减少缩进，避免长菜单文案被截断 */
+.sider-menu :deep(.ant-menu-submenu .ant-menu-item) {
+  padding-inline-start: 30px !important;
+  padding-inline-end: 8px !important;
+  font-size: 13px;
+}
+
+.sider-menu :deep(.ant-menu-submenu-arrow) {
+  inset-inline-end: 10px;
 }
 
 .sider-menu :deep(.ant-menu-item-selected) {

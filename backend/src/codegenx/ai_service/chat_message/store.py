@@ -6,7 +6,7 @@
 - content 列 = 整条消息 dict 的 JSON 序列化（jsonb，含 tool_calls / tool_call_id 等
   结构字段），读侧 json.loads 还原，保证与原 jsonl 文件时代完全同构；
 - 超长消息外置（P1-13）：content 超过 _BLOB_THRESHOLD_BYTES 时，原文写本地
-  blob 文件（.data/{user}/{app}/message_blobs/{session}/{seq}.json），行内
+  blob 文件（.data/{user}/{app}/session/{session}/message_blobs/{seq}.json），行内
   content 只存 {"payload_ref": <路径>} 桩；读侧 _parse_content 透明还原，
   blob 文件丢失时返回占位 dict（记忆提取/历史展示不中断）；
 - role 列冗余存储（user/assistant/tool），供 SQL 过滤与统计；
@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from db.postgres.postgres_client import (
@@ -41,12 +41,12 @@ _partitions_ensured = False
 
 
 async def ensure_partitions(months_ahead: int = 3) -> int:
-    """补齐 message.chat_message 未来月份分区，返回本次新建的分区数。
+    """补齐 agent.chat_message 未来月份分区，返回本次新建的分区数。
 
     供应用启动钩子调用；内部实现为幂等的 PL/pgSQL 函数。
     """
     created = await memory_fetchval(
-        "SELECT message.ensure_chat_message_partitions($1)", int(months_ahead)
+        "SELECT agent.ensure_chat_message_partitions($1)", int(months_ahead)
     )
     return int(created or 0)
 
@@ -64,10 +64,11 @@ async def _ensure_partitions_once() -> None:
 
 
 def _blob_path(user_id, app_id, session_id: str, seq: int) -> Path:
-    from shared.constants import DATA_ROOT_DIR
+    # blob 归属会话目录，随会话过期整体删除
+    from shared.constants import get_session_dir
     return (
-        DATA_ROOT_DIR / str(user_id) / str(app_id)
-        / "message_blobs" / session_id / f"{seq}.json"
+        get_session_dir(user_id, app_id) / str(session_id)
+        / "message_blobs" / f"{seq}.json"
     )
 
 
@@ -106,7 +107,7 @@ class ChatMessageStore(BaseComponent):
         async with memory_transaction() as conn:
             await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", session_id)
             max_seq = await conn.fetchval(
-                "SELECT COALESCE(MAX(seq), 0) FROM message.chat_message WHERE session_id = $1",
+                "SELECT COALESCE(MAX(seq), 0) FROM agent.chat_message WHERE session_id = $1",
                 session_id,
             )
             seq = int(max_seq or 0) + 1
@@ -121,7 +122,7 @@ class ChatMessageStore(BaseComponent):
                     log.error("超长消息 blob 写盘失败，回退直存: {}", exc)
 
             await conn.execute(
-                "INSERT INTO message.chat_message "
+                "INSERT INTO agent.chat_message "
                 "(message_uid, user_id, session_id, app_id, seq, role, "
                 "content, content_bytes, content_tokens, "
                 "model, prompt_tokens, completion_tokens, finish_reason) "
@@ -152,7 +153,7 @@ class ChatMessageStore(BaseComponent):
         供记忆提取增量消费；解析失败的行跳过（坏行不阻断水位推进）。
         """
         sql = (
-            "SELECT seq, message_uid, content FROM message.chat_message "
+            "SELECT seq, message_uid, content FROM agent.chat_message "
             "WHERE session_id = $1 AND seq > $2 ORDER BY seq ASC"
         )
         args: list = [session_id, int(after_seq)]
@@ -175,7 +176,7 @@ class ChatMessageStore(BaseComponent):
             return []
         rows = await memory_fetch(
             "SELECT message_uid, session_id, seq, role, content, created_at "
-            "FROM message.chat_message WHERE message_uid = ANY($1::text[]) "
+            "FROM agent.chat_message WHERE message_uid = ANY($1::text[]) "
             "ORDER BY session_id, seq ASC LIMIT $2",
             list(message_uids[:500]), int(limit),
         )
@@ -200,7 +201,7 @@ class ChatMessageStore(BaseComponent):
         每条消息补 create_time / seq / user_id（与原 jsonl 时代响应字段对齐）。
         """
         rows = await memory_fetch(
-            "SELECT seq, user_id, content, created_at FROM message.chat_message "
+            "SELECT seq, user_id, content, created_at FROM agent.chat_message "
             "WHERE session_id = $1 AND user_id = $2 "
             "ORDER BY seq DESC LIMIT $3",
             session_id, str(user_id), int(limit),
@@ -217,17 +218,24 @@ class ChatMessageStore(BaseComponent):
         return result
 
     async def list_sessions(
-        self, user_id: str, app_id: str, limit: int = 5
+        self, user_id: str, app_id: str, limit: int = 5, days: int | None = None,
     ) -> list[dict]:
         """列出「用户 + app」下最近的会话（直接聚合 chat_message 表，无独立索引）。
 
         每会话取首条 user 消息正文前 50 字符作 first_message（与原
         session_index.json 口径一致）；按会话最后一条 user 消息时间倒序，
         create_time 为会话首条消息时间。
+        days：只返回"最后活跃时间在 N 天内"的会话（None/<=0 = 不限），用于历史列表展示窗口。
         """
         # 窗口函数：rn=1 取每会话首条 user 消息，last_time 用于"最近活跃"排序；
         # user 消息总是先于本轮其余消息落库，故 last user 消息时间即最后一轮起点。
         # content 为 jsonb，->>'content' 直接取正文文本。
+        args: list = [str(user_id), str(app_id), int(limit)]
+        where_time = ""
+        if days and days > 0:
+            cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=int(days))
+            args.append(cutoff)
+            where_time = f" AND last_time >= ${len(args)}"
         sql = (
             "SELECT session_id, first_message, create_time FROM ("
             " SELECT session_id,"
@@ -235,12 +243,13 @@ class ChatMessageStore(BaseComponent):
             " created_at AS create_time,"
             " ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY seq ASC) AS rn,"
             " MAX(created_at) OVER (PARTITION BY session_id) AS last_time"
-            " FROM message.chat_message"
+            " FROM agent.chat_message"
             " WHERE user_id = $1 AND app_id = $2 AND role = 'user'"
             ") t WHERE rn = 1"
+            f"{where_time}"
             " ORDER BY last_time DESC LIMIT $3"
         )
-        rows = await memory_fetch(sql, str(user_id), str(app_id), int(limit))
+        rows = await memory_fetch(sql, *args)
         return [
             {
                 "session_id": str(sid or ""),
@@ -256,10 +265,20 @@ class ChatMessageStore(BaseComponent):
 
     # === 清理 ===
 
-    async def delete_before(self, cutoff: datetime) -> int:
-        """物理删除 cutoff 之前的消息（保留期清理），返回删除行数。"""
+    async def delete_extracted_before(self, cutoff: datetime) -> int:
+        """物理删除 cutoff 之前**且已被记忆提炼覆盖**的消息，返回删除行数。
+
+        记忆保护：agent.memory_watermark.last_seq 是会话内单调递增的提炼消费位点，
+        只有 seq <= last_seq 的行才允许删除；无水位记录（未启用记忆）的会话按纯时间删除。
+        """
         result = await memory_execute(
-            "DELETE FROM message.chat_message WHERE created_at < $1", cutoff
+            "DELETE FROM agent.chat_message m"
+            " WHERE m.created_at < $1"
+            "   AND NOT EXISTS ("
+            "     SELECT 1 FROM agent.memory_watermark w"
+            "     WHERE w.session_id = m.session_id AND m.seq > w.last_seq"
+            "   )",
+            cutoff,
         )
         # asyncpg execute 返回命令标签（如 'DELETE 5'），取末段为行数
         try:

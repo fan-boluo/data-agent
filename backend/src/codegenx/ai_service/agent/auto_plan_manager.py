@@ -1,4 +1,4 @@
-import time
+﻿import time
 import asyncio
 from codegenx.ai_service.agent.agent_schema import AgentState, AgentEventType
 from codegenx.ai_service.agent.agents.agent import AgentMessage
@@ -47,8 +47,8 @@ class AutoPlanManager:
 
             # ── 用户消息包装 + 写入会话历史真相源 ──
             user_text = str(getattr(session_state.request, "message", "") or "")
-            if session_state.context_manager is not None:
-                session_state.context_manager.add_user_message(user_text)
+            if session_state.context is not None:
+                session_state.context.add_user_message(user_text)
             msg = AgentMessage(
                 sender="user",
                 recipient="leader",
@@ -71,7 +71,7 @@ class AutoPlanManager:
                 await self._reply_and_finish(session_state, "执行失败：找不到智能体 leader")
                 return
             # 实例必须每请求新建、禁止缓存复用；context=会话真相源（SessionContext）
-            cm = session_state.context_manager
+            cm = session_state.context
             if cm is not None:
                 cm.db_name = session_state.db_name  # 同步数据库名到 context
             agent = spec.cls(context=cm)
@@ -138,13 +138,13 @@ class AutoPlanManager:
             activate_turn.finished_at = time.time()
             # turn 边界：触发后台会话摘要提取（非阻塞；失败不影响本轮收尾）
             try:
-                await session_state.context_manager.session_summary_extract()
+                await session_state.context.session_summary_extract()
             except Exception:
                 log.exception("compact_after_turn 执行异常（非致命）")
             # 注：子智能体消息全部内联为 lead 的 tool result，本层无跨 agent
             # 消息需清理；SSE 订阅队列由消费端 unsubscribe 管理。
             await get_app().session_io.save_turn_chat_message_snapshot(
-                session_state.context_manager.chat_messages,
+                session_state.context.chat_messages,
                 user_id=session_state.user_id,
                 app_id=session_state.app_id,
                 session_id=session_state.session_id,
@@ -175,8 +175,8 @@ class AutoPlanManager:
         """短路分支收尾：把面向用户的回复经 REQUEST_COMPLETED 事件下发。"""
         session_state.activate_turn.state = AgentState.COMPLETED
         # 最终答复写入会话历史真相源（用户可见的最终轮）
-        if session_state.context_manager is not None:
-            session_state.context_manager.add_assistant_message(content)
+        if session_state.context is not None:
+            session_state.context.add_assistant_message(content)
         # 终答入库须早于 TURN_END（记忆漏斗/warm_extract 按表中完整轮次消费）
         await AutoPlanManager._persist_assistant_message(session_state, content)
         await _message_bus().publish_runtime_event(
@@ -210,3 +210,4 @@ class AutoPlanManager:
             )
         except Exception as exc:  # noqa: BLE001 —— 入库失败不阻断对话
             log.warning("assistant 消息入库失败（不影响对话）: {}", exc)
+

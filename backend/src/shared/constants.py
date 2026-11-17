@@ -37,12 +37,20 @@ LOG_FILE = LOG_DIR / "app.log"  # 存储日志的文件
 
 DATA_ROOT_DIR = ROOT_DIR / ".data"
 
+# 系统产物目录名（工作区内可见的专用目录）：图表/报告统一落此目录，
+# 避免与用户自建的 output/ 同名冲突（code/ 是用户自己的工作区，由用户管理）
+SYSTEM_OUTPUT_DIR = "agent_output"
+
 def get_runtime_app_dir(user_id: str | int, app_id: str | int) -> Path:
     # 用户/项目 两级目录：.data/{userId}/{appId}
     return DATA_ROOT_DIR / str(user_id) / str(app_id)
 
 def get_code_dir(user_id: str | int, app_id: str | int) -> Path:
     return get_runtime_app_dir(user_id, app_id) / "code"
+
+def get_output_dir(user_id: str | int, app_id: str | int, *parts: str) -> Path:
+    """系统产物目录（图表/报告），位于用户工作区内的专用子目录（文件树可见）。"""
+    return get_code_dir(user_id, app_id).joinpath(SYSTEM_OUTPUT_DIR, *parts)
 
 
 def get_context_dir(user_id: str | int, app_id: str | int) -> Path:

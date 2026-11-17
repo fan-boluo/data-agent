@@ -28,12 +28,14 @@ def _get_agent_classes() -> list[type]:
     from codegenx.ai_service.agent.agents.plan_agent import PlannerAgent
     from codegenx.ai_service.agent.agents.data_explore_agent import DateExploreAgent
     from codegenx.ai_service.agent.agents.csv_explore_agent import CsvExploreAgent
+    from codegenx.ai_service.agent.agents.report_agent import ReportAgent
 
     _AGENT_CLASSES.extend([
         LeaderAgent,
         PlannerAgent,
         DateExploreAgent,
         CsvExploreAgent,
+        ReportAgent,
     ])
     return _AGENT_CLASSES
 

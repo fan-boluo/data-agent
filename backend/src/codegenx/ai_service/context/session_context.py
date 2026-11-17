@@ -95,8 +95,6 @@ class SessionContext(CommonContext):
     # 会话归属用户，决定 .data/{userId}/{appId} 两级路径
     user_id: str = ""
     db_name: str | None = None
-    # P4：会话归属智能体
-    agent_name: str = "leader"
 
     # 系统提示词
     system_prompt: str = ""
@@ -232,20 +230,6 @@ class SessionContext(CommonContext):
         if isinstance(message,str):
             self.chat_messages.append({"role":"user","content":message})
 
-    # def add_agent_result(self, agent_name: str, task: str, result: str, success: bool = True) -> None:
-    #     """子 agent 回传写入会话历史（多 agent 链路，方案《上下文工程设计方案2》§6.1）。
-    #
-    #     - role/content 保证 LLM 与 normalize_history 兼容；
-    #     - agent/task/success 为独立附带字段（normalize_history 透传 agent），
-    #       供 Supervisor 历史视图过滤，不做字符串前缀解析。
-    #     """
-    #     self.chat_messages.append({
-    #         "role": "assistant",
-    #         "content": f"[{agent_name}] {result}",
-    #         "agent": agent_name,
-    #         "task": task,
-    #         "success": success,
-    #     })
 
     def add_assistant_message(self, message):
         if isinstance(message,dict):

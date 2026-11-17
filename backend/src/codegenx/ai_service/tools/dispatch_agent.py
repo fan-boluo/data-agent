@@ -1,4 +1,4 @@
-"""lead 派发工具（agent-as-tool 同步执行协议）。
+﻿"""lead 派发工具（agent-as-tool 同步执行协议）。
 
 dispatch_agent 是一个普通工具：调用时同步执行目标子智能体的完整 run()，
 其最终结果作为 tool result 回填对话，lead 在同一 ReAct 工具循环内继续决策。
@@ -14,11 +14,12 @@ session_state 参数即自动注入完整会话状态（与 signal 注入同机�
 """
 
 import asyncio
+import time
 from typing import Any
 
 from codegenx.ai_service.agent.agents.agent import AgentMessage
 from codegenx.ai_service.agent.agents.supervisor_board import TaskBoardCoordinator
-from codegenx.ai_service.agent.runtime_schema import raise_if_stop_signal
+from codegenx.ai_service.agent.runtime_schema import SubAgentInfo, raise_if_stop_signal
 from codegenx.ai_service.context.sub_context import SubContext
 from codegenx.ai_service.system_app import get_app
 from codegenx.ai_service.tools.base import BaseTool, ToolResult
@@ -96,6 +97,17 @@ class DispatchAgentTool(BaseTool):
         if spec is None or spec.cls is None:
             return ToolResult(success=False, message=f"未注册的智能体：{agent}")
 
+        # 全局可用性拦截：管理员停用 / 模型链全部熔断打开的目标不可派发（回给 LLM 改路）
+        from codegenx.resource_service.agents import get_unavailable_agent_names
+
+        unavailable_reason = (await get_unavailable_agent_names()).get(spec.name)
+        if unavailable_reason:
+            return ToolResult(
+                success=False,
+                message=f"智能体 {agent} 当前不可用（{unavailable_reason}），请改派其他可用智能体或自行处理",
+                error_class="agent_unavailable",
+            )
+
         # 停止信号：派发执行前置检查（子智能体 run 内部亦逐轮检查）
         raise_if_stop_signal(session_state)
 
@@ -104,7 +116,7 @@ class DispatchAgentTool(BaseTool):
         if agent == "planner" and board.has_planner_tasks(session_state.request):
             return ToolResult(
                 success=False,
-                message="本请求看板已有计划任务：请直接执行或派发看板就绪任务，勿重复规划",
+                message="本请求看板已有计划任务：请直接执行或派发看板就绪任务，若需重新规划，先删除旧看板计划，勿重复规划",
             )
 
         # 检查要执行的task是不是在看板中的，如果是则认领更新看板
@@ -117,6 +129,22 @@ class DispatchAgentTool(BaseTool):
             task_id = reuse.id
             step_id = reuse.step_id
 
+        # 生命周期登记：activate_turn.active_sub_agents 观测注册表
+        sub_key = f"{agent}:{task_id or task_text[:16]}"
+        sub_info = SubAgentInfo(agent_name=agent, task_id=str(task_id or ""), started_at=time.time())
+        session_state.activate_turn.active_sub_agents[sub_key] = sub_info
+
+        # 同步执行一次（失败不自动外重试）：
+        # 工具/LLM 层的瞬态/超时/熔断已在调用链路内重试；子智能体自身 ReAct 循环内
+        # 已基于工具失败结果做 observation 阶段的 in-loop 改路/重试。
+        # 这里只把最终失败原因作为 tool result 回填，由 leader 决定换派/改路。
+        sub_context = SubContext(
+            session_id=session_state.session_id,
+            app_id=session_state.app_id,
+            user_id=session_state.user_id,
+            db_name=session_state.db_name,
+            agent_name=agent,
+        )
         dispatch = AgentMessage(
             sender=LEADER_AGENT_NAME,
             recipient=agent,
@@ -129,36 +157,29 @@ class DispatchAgentTool(BaseTool):
         )
         log.info("【lead DISPATCH】{} ──► {} | task_id={} | task={}",
                  LEADER_AGENT_NAME, agent, task_id, task_text[:80])
-        # 子智能体独立上下文（一次性工作区，压缩只压自己不碰会话真相源）
-        sub_context = SubContext(
-            session_id=session_state.session_id,
-            app_id=session_state.app_id,
-            user_id=session_state.user_id,
-            db_name=session_state.db_name,
-            agent_name=agent,
-        )
         # context 由 __init__ 绑定，run 不再传 context 参数
         child_msg = await spec.cls(context=sub_context).run(dispatch, session_state, is_stream=True)
+        sub_info.finished_at = time.time()
+        sub_info.success = bool(child_msg.success) if child_msg is not None else False
+        sub_info.message = str(child_msg.result or "")[:500] if child_msg is not None else ""
 
         # 看板闭环（计划任务）：completed + 解锁下游
         if child_msg is not None and child_msg.task_id is not None:
             board.complete_task(task_id=child_msg.task_id, executor=child_msg.sender, request=session_state.request)
 
         # 工具结果本来就会加入上下文，这里不用重复加
-        # 子智能体结果写入会话历史真相源（后续轮次 lead 历史视图可见）
         result_text = str(child_msg.result or "").strip() if child_msg is not None else ""
         success = bool(child_msg.success) if child_msg is not None else False
-        # cm = getattr(session_state, "context_manager", None)
-        # if cm is not None and child_msg is not None:
-        #     cm.add_agent_result(agent, task_text, result_text, success=success)
-        # log.info("【lead DISPATCH】{} 回传（{}）| task_id={} | result_len={}",
-        #          agent, "成功" if success else "失败", task_id, len(result_text))
 
         # 失败/空结果以失败说明回填（LLM 自纠：改口径重派或如实汇总）
-        # 归因 subagent_failed：不是参数错也不是基础设施故障，不计工具熔断
+        # 归因：非基础设施故障，不计工具熔断
         if child_msg is None:
-            return ToolResult(success=False, message="执行失败：子智能体未返回结果", error_class="subagent_failed")
+            return ToolResult(success=False, message="执行失败：子智能体未返回结果",
+                              error_class="subagent_failed")
         if success:
             return ToolResult(success=True, data=result_text or "执行完成，但子智能体未返回结果文本。")
+        # 子智能体失败：失败原因原文回填（不重复归因）；error_class 仅用于指标口径，
+        # 不计入 dispatch_agent 自身熔断（非基础设施故障）
         return ToolResult(success=False, message=f"执行失败：{result_text or '（无失败说明）'}",
                           error_class="subagent_failed")
+

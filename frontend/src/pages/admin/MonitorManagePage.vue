@@ -94,13 +94,16 @@
             :columns="turnColumns"
             :data-source="sessionTurns"
             :pagination="false"
-            :scroll="{ x: 720 }"
+            :scroll="{ x: 1180 }"
           >
             <template #bodyCell="{ column, record }">
               <template v-if="column.dataIndex === 'status'">
                 <a-tag :color="turnStatusColor(record.status)">{{ record.status }}</a-tag>
               </template>
-              <template v-else-if="column.dataIndex === 'durationMs'">{{ formatMs(record.durationMs) }}</template>
+              <template v-else-if="column.dataIndex === 'startedAt'">
+                {{ formatDateTime(record.startedAt) }}
+              </template>
+              <template v-else-if="column.dataIndex === 'durationMs'">{{ formatDuration(record.durationMs) }}</template>
               <template v-else-if="column.dataIndex === 'traceId'">
                 <span class="mono-text" :title="record.traceId">{{ shortTraceId(record.traceId) }}</span>
               </template>
@@ -123,10 +126,10 @@
           <a-descriptions-item label="状态">
             <a-tag :color="turnStatusColor(currentTurn.status)">{{ currentTurn.status }}</a-tag>
           </a-descriptions-item>
-          <a-descriptions-item label="Turn 耗时">{{ formatMs(currentTurn.durationMs) }}</a-descriptions-item>
+          <a-descriptions-item label="Turn 耗时">{{ formatDuration(currentTurn.durationMs) }}</a-descriptions-item>
           <a-descriptions-item label="错误数">{{ currentTurn.errorCount }}</a-descriptions-item>
-          <a-descriptions-item label="LLM 总耗时">{{ formatMs(currentTurn.llmLatencyMs) }}</a-descriptions-item>
-          <a-descriptions-item label="首包耗时">{{ formatMs(currentTurn.firstTokenMs) }}</a-descriptions-item>
+          <a-descriptions-item label="LLM 总耗时">{{ formatDuration(currentTurn.llmLatencyMs) }}</a-descriptions-item>
+          <a-descriptions-item label="首包耗时">{{ formatDuration(currentTurn.firstTokenMs) }}</a-descriptions-item>
           <a-descriptions-item label="Span 数">{{ spanTree?.spanCount ?? 0 }}</a-descriptions-item>
         </a-descriptions>
 
@@ -145,7 +148,7 @@
                 </a-tag>
                 <span class="span-name">{{ row.name || row.opType }}</span>
                 <a-tag :color="row.status === 'error' ? 'red' : 'green'">{{ row.status }}</a-tag>
-                <span class="span-meta">{{ row.opType }} · {{ formatMs(row.durationMs) }}</span>
+                <span class="span-meta">{{ row.opType }} · {{ formatDuration(row.durationMs) }}</span>
               </div>
               <div class="span-track">
                 <div
@@ -170,6 +173,7 @@
 <script lang="ts" setup>
 import { computed, onMounted, reactive, ref } from 'vue'
 import { message } from 'ant-design-vue'
+import dayjs from 'dayjs'
 import {
   getMonitorSessionDetail,
   getMonitorTurnSpans,
@@ -232,10 +236,12 @@ const sessionColumns = [
 
 const turnColumns = [
   { title: '轮次', dataIndex: 'turnNumber', width: 70 },
+  { title: 'Trace ID', dataIndex: 'traceId', width: 200 },
+  { title: '开始时间', dataIndex: 'startedAt', width: 170 },
+  { title: '用户输入', dataIndex: 'userInput', width: 280, ellipsis: true },
+  { title: '错误数', dataIndex: 'errorCount', width: 80 },
   { title: '状态', dataIndex: 'status', width: 90 },
   { title: '耗时', dataIndex: 'durationMs', width: 100 },
-  { title: '错误数', dataIndex: 'errorCount', width: 80 },
-  { title: 'Trace ID', dataIndex: 'traceId', width: 200 },
   { title: '操作', dataIndex: 'action', width: 100, fixed: 'right' as const },
 ]
 
@@ -421,14 +427,12 @@ const spanKindMeta = (opType?: string) => {
   return map[opType || ''] || { label: opType || '其他', tagColor: 'default', barColor: '#8c8c8c' }
 }
 
-const formatMs = (value?: number) => (value == null ? '-' : `${Math.round(Number(value))} ms`)
+// 耗时统一以秒展示（后端字段为毫秒）
+const formatDuration = (value?: number) => (value == null ? '-' : `${(Number(value) / 1000).toFixed(2)}s`)
 
-const formatIdle = (seconds?: number) => {
-  const value = Number(seconds || 0)
-  if (value < 60) return `${value}s`
-  if (value < 3600) return `${Math.floor(value / 60)}m`
-  return `${(value / 3600).toFixed(1)}h`
-}
+const formatDateTime = (value?: string) => (value ? dayjs(value).format('YYYY-MM-DD HH:mm:ss') : '-')
+
+const formatIdle = (seconds?: number) => `${Math.round(Number(seconds || 0))}s`
 
 const formatRelativeTime = (value?: string) => {
   if (!value) return '-'

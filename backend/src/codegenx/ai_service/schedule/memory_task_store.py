@@ -2,8 +2,8 @@
 记忆离线任务队列 + 消费水位 —— PostgreSQL DAO（asyncpg 原生）。
 
 对应表（DDL 见 init/pg_memory_schema.sql，由部署方手动执行，本模块不建表）：
-  memory.memory_task      离线任务队列（idempotency_key 幂等 + produced_count 审计）
-  memory.memory_watermark  会话消息消费水位（chat_message.seq，会话内单调递增）
+  agent.memory_task      离线任务队列（idempotency_key 幂等 + produced_count 审计）
+  agent.memory_watermark  会话消息消费水位（chat_message.seq，会话内单调递增）
 
 状态机：pending → running → done
                 └→ 失败：retry_count+1，按退避(1m/5m/30m)回 pending；超限 → dead
@@ -66,7 +66,7 @@ class MemoryTaskStore:
         """
         if dedup:
             hit = await memory_fetchval(
-                "SELECT id FROM memory.memory_task "
+                "SELECT id FROM agent.memory_task "
                 "WHERE task_type = $1 AND session_id = $2 AND status IN ('pending','running') "
                 "LIMIT 1",
                 task_type, session_id,
@@ -75,7 +75,7 @@ class MemoryTaskStore:
                 return None
         # 幂等键冲突时不插入，RETURNING 无行 → 返回 None
         new_id = await memory_fetchval(
-            "INSERT INTO memory.memory_task "
+            "INSERT INTO agent.memory_task "
             "(task_type, idempotency_key, app_id, user_id, session_id, status, payload, next_run_at) "
             "VALUES ($1, $2, $3, $4, $5, 'pending', $6::jsonb, $7) "
             "ON CONFLICT (idempotency_key) DO NOTHING "
@@ -101,7 +101,7 @@ class MemoryTaskStore:
         now = now or time.time()
         async with memory_transaction() as conn:
             rows = await conn.fetch(
-                "SELECT * FROM memory.memory_task "
+                "SELECT * FROM agent.memory_task "
                 "WHERE status = 'pending' AND next_run_at <= $1 "
                 "ORDER BY id LIMIT $2 FOR UPDATE SKIP LOCKED",
                 int(now), int(limit),
@@ -110,7 +110,7 @@ class MemoryTaskStore:
             if tasks:
                 ids = [int(t["id"]) for t in tasks]
                 await conn.execute(
-                    "UPDATE memory.memory_task SET status = 'running' WHERE id = ANY($1::bigint[])",
+                    "UPDATE agent.memory_task SET status = 'running' WHERE id = ANY($1::bigint[])",
                     ids,
                 )
                 for t in tasks:
@@ -125,7 +125,7 @@ class MemoryTaskStore:
         """完成（produced_count 审计 + payload 执行结果回填）。"""
         if result_payload:
             await memory_execute(
-                "UPDATE memory.memory_task SET status = 'done', produced_count = $2, "
+                "UPDATE agent.memory_task SET status = 'done', produced_count = $2, "
                 "last_error = NULL, "
                 "payload = COALESCE(payload, '{}'::jsonb) || $3::jsonb "
                 "WHERE id = $1",
@@ -134,7 +134,7 @@ class MemoryTaskStore:
             )
         else:
             await memory_execute(
-                "UPDATE memory.memory_task SET status = 'done', produced_count = $2, "
+                "UPDATE agent.memory_task SET status = 'done', produced_count = $2, "
                 "last_error = NULL WHERE id = $1",
                 int(task_id), int(produced_count),
             )
@@ -142,7 +142,7 @@ class MemoryTaskStore:
     async def reschedule(self, task_id: int, delay_sec: float = 60.0) -> None:
         """无过错重排（如会话锁被占）：保持 pending，延后领取，不计失败次数。"""
         await memory_execute(
-            "UPDATE memory.memory_task SET status = 'pending', next_run_at = $2 WHERE id = $1",
+            "UPDATE agent.memory_task SET status = 'pending', next_run_at = $2 WHERE id = $1",
             int(task_id), int(time.time() + delay_sec),
         )
 
@@ -153,7 +153,7 @@ class MemoryTaskStore:
         这里显式赋值是为了语义清晰（本语句只做心跳，不改业务字段）。
         """
         await memory_execute(
-            "UPDATE memory.memory_task SET updated_at = now() "
+            "UPDATE agent.memory_task SET updated_at = now() "
             "WHERE id = $1 AND status = 'running'",
             int(task_id),
         )
@@ -162,10 +162,10 @@ class MemoryTaskStore:
         """卡死回收：running 且 updated_at 超时的任务复位 pending。
 
         Worker 崩溃会让任务永久停在 running；巡检每分钟跑一次。
-        返回复位行数（指标 memory.task.stuck_reclaimed）。
+        返回复位行数（指标 agent.task.stuck_reclaimed）。
         """
         rows = await memory_fetch(
-            "UPDATE memory.memory_task SET status = 'pending', next_run_at = $1 "
+            "UPDATE agent.memory_task SET status = 'pending', next_run_at = $1 "
             "WHERE status = 'running' "
             "AND updated_at < now() - make_interval(secs => $2::int) "
             "RETURNING id",
@@ -177,7 +177,7 @@ class MemoryTaskStore:
         """失败退避：回 pending 延迟重试；超限置 dead。返回处理后的状态。"""
         now = time.time()
         prev = await memory_fetchval(
-            "SELECT retry_count FROM memory.memory_task WHERE id = $1", int(task_id)
+            "SELECT retry_count FROM agent.memory_task WHERE id = $1", int(task_id)
         )
         retry = (int(prev or 0)) + 1
         if retry > len(backoffs):
@@ -185,7 +185,7 @@ class MemoryTaskStore:
         else:
             status, next_at = "pending", now + backoffs[retry - 1]
         await memory_execute(
-            "UPDATE memory.memory_task SET status = $1, retry_count = $2, "
+            "UPDATE agent.memory_task SET status = $1, retry_count = $2, "
             "next_run_at = $3, last_error = $4 WHERE id = $5",
             status, retry, int(next_at), error[:2000], int(task_id),
         )
@@ -194,7 +194,7 @@ class MemoryTaskStore:
     async def recover_running(self) -> int:
         """启动/关闭时把 running 任务复位 pending（崩溃恢复，at-least-once）。"""
         rows = await memory_fetch(
-            "UPDATE memory.memory_task SET status = 'pending' "
+            "UPDATE agent.memory_task SET status = 'pending' "
             "WHERE status = 'running' RETURNING id"
         )
         changed = len(rows)
@@ -206,14 +206,14 @@ class MemoryTaskStore:
 
     async def stats(self) -> dict[str, int]:
         rows = await memory_fetch(
-            "SELECT status, COUNT(*) AS c FROM memory.memory_task GROUP BY status"
+            "SELECT status, COUNT(*) AS c FROM agent.memory_task GROUP BY status"
         )
         return {str(r["status"]): int(r["c"]) for r in rows}
 
     async def get_by_id(self, task_id: int) -> dict | None:
         """按 id 取任务完整行（提炼批次排查）。payload 解析为 dict。"""
         row = await memory_fetchrow(
-            "SELECT * FROM memory.memory_task WHERE id = $1", int(task_id)
+            "SELECT * FROM agent.memory_task WHERE id = $1", int(task_id)
         )
         if row is None:
             return None
@@ -236,18 +236,18 @@ class MemoryTaskStore:
     async def _scheduled_today(self, task_type: str) -> bool:
         today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
         hit = await memory_fetchval(
-            "SELECT id FROM memory.memory_task WHERE task_type = $1 "
+            "SELECT id FROM agent.memory_task WHERE task_type = $1 "
             "AND status IN ('pending','running','done') AND created_at >= $2 LIMIT 1",
             task_type, today_start,
         )
         return hit is not None
 
-    # === 水位（memory.memory_watermark 表）===
+    # === 水位（agent.memory_watermark 表）===
 
     async def get_watermark(self, session_id: str) -> int:
         """读取会话消费水位（已消费的最大 chat_message.seq）；无记录返回 0。"""
         val = await memory_fetchval(
-            "SELECT last_seq FROM memory.memory_watermark WHERE session_id = $1", session_id
+            "SELECT last_seq FROM agent.memory_watermark WHERE session_id = $1", session_id
         )
         return int(val or 0)
 
@@ -255,7 +255,7 @@ class MemoryTaskStore:
         """读取完整水位状态（漏斗触发判断用）。"""
         row = await memory_fetchrow(
             "SELECT last_seq, pending_signals, pending_tokens, last_extract_at "
-            "FROM memory.memory_watermark WHERE session_id = $1",
+            "FROM agent.memory_watermark WHERE session_id = $1",
             session_id,
         )
         return dict(row) if row else None
@@ -269,12 +269,12 @@ class MemoryTaskStore:
         只动 pending_* 计数，不碰 last_seq（消费位点唯一写者是提炼 Worker）。
         """
         await memory_execute(
-            "INSERT INTO memory.memory_watermark "
+            "INSERT INTO agent.memory_watermark "
             "(session_id, app_id, user_id, last_seq, pending_signals, pending_tokens) "
             "VALUES ($1, $2, $3, 0, $4, $5) "
             "ON CONFLICT (session_id) DO UPDATE SET "
-            "pending_signals = memory.memory_watermark.pending_signals + EXCLUDED.pending_signals, "
-            "pending_tokens = memory.memory_watermark.pending_tokens + EXCLUDED.pending_tokens",
+            "pending_signals = agent.memory_watermark.pending_signals + EXCLUDED.pending_signals, "
+            "pending_tokens = agent.memory_watermark.pending_tokens + EXCLUDED.pending_tokens",
             session_id, str(app_id), str(user_id or ""),
             max(0, int(signals)), max(0, int(tokens)),
         )
@@ -288,7 +288,7 @@ class MemoryTaskStore:
         updated_at 由触发器自动刷新，本表随之脱离 stale 扫描集。
         """
         await memory_execute(
-            "UPDATE memory.memory_watermark "
+            "UPDATE agent.memory_watermark "
             "SET pending_signals = 0, pending_tokens = 0 "
             "WHERE session_id = $1",
             session_id,
@@ -298,7 +298,7 @@ class MemoryTaskStore:
         """兜底扫描：有积压信号且超时未处理的会话（投递前崩溃补投）。"""
         rows = await memory_fetch(
             "SELECT session_id, app_id, user_id, pending_signals, pending_tokens "
-            "FROM memory.memory_watermark "
+            "FROM agent.memory_watermark "
             "WHERE (pending_signals > 0 OR pending_tokens > 0) "
             "AND updated_at < now() - make_interval(secs => $1::int) "
             "ORDER BY updated_at LIMIT $2",
@@ -315,7 +315,7 @@ class MemoryTaskStore:
         崩溃在推进前则计数保留，重试覆盖同一区间（幂等）。
         """
         await memory_execute(
-            "INSERT INTO memory.memory_watermark "
+            "INSERT INTO agent.memory_watermark "
             "(session_id, app_id, user_id, last_seq) "
             "VALUES ($1, $2, $3, $4) "
             "ON CONFLICT (session_id) DO UPDATE SET last_seq = EXCLUDED.last_seq, "

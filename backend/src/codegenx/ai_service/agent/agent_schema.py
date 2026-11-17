@@ -29,6 +29,14 @@ class AgentEventType(str, Enum):
     SQL_START = "SQL_Start"
     SQL_END = "SQL_End"
 
+class MessageType(str, Enum):
+    TEXT = "TEXT"
+    # CHART：ECharts option（JSON）驱动前端交互式渲染
+    # IMAGE：普通图片（PNG/SVG 等）文件渲染
+    CHART = "CHART"
+    IMAGE = "IMAGE"
+    REPORT = "REPORT"
+
 
 class AgentEvent(BaseModel):
     session_id:str
@@ -37,3 +45,4 @@ class AgentEvent(BaseModel):
     event_type: AgentEventType
     data: Any = None
     state: AgentState
+    message_type : MessageType = MessageType.TEXT

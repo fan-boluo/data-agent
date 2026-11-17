@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     postgres_pool_min: int = 1
     postgres_pool_max: int = 5
 
-    # 记忆域连接池（memory.* + message.chat_message）：聊天写入与提炼 Worker 高频使用，
+    # 记忆域连接池（agent.*：agent_memory / chat_message 等）：聊天写入与提炼 Worker 高频使用，
     # 与语义层分池，避免长事务拖慢语义检索
     postgres_memory_pool_min: int = 2
     postgres_memory_pool_max: int = 10

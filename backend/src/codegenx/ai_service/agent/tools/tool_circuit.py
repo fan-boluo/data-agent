@@ -81,6 +81,19 @@ def is_infra_failure(exc: BaseException | None = None, message: str = "") -> boo
 
 # ── 执行器侧的最小接口：准入 / 归还 / 记账（分类口径留在本模块）─────────────
 
+def unhealthy_tools() -> dict[str, str]:
+    """当前不可用工具（熔断 open 且在冷却期）→ 不可用原因（P1-2 健康态）。
+
+    供工具目录构建前下线过滤与 prompt「当前不可用工具」提示；半开探测成功后
+    熔断自动闭合，下一次构建目录即恢复挂载，无需显式恢复动作。
+    """
+    return {
+        name: f"熔断打开（连续基础设施失败），冷却 {config.tools.circuit.recovery_timeout_seconds}s 后半开探测"
+        for name, breaker in _tool_breakers.items()
+        if breaker.is_open()
+    }
+
+
 async def acquire_slot(tool_name: str) -> bool:
     """熔断准入（False=快速失败；半开态占用一个探测名额）。"""
     return await get_tool_breaker(tool_name).acquire()

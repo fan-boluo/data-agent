@@ -58,6 +58,7 @@ export interface MonitorTurnSummary {
   contextTokens: number
   contextTokenUsage: number
   errorCount: number
+  userInput?: string
   startedAt?: string
   endedAt?: string
   durationMs: number

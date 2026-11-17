@@ -1,11 +1,10 @@
-"""trace 周期维护：PG telemetry 保留期清理 + MySQL chat_message 历史清理。
+"""trace 维护服务：telemetry 保留期清理（traces / trace_spans）。
 
-- telemetry.traces / trace_spans 按 started_at 保留期删除（先子后父）
-- chat_message 清理沿用原逻辑（MySQL，主业务表，与监控双轨清理无关）
+周期调度已统一收口到 `schedule/retention.py`（RetentionScheduler），本模块只提供
+可被调度器/管理端直接调用的清理实现，不再自持后台循环。
 """
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, datetime, timedelta
 
 from shared import log
@@ -15,16 +14,9 @@ from codegenx.ai_service.system_app import SystemApp
 from codegenx.ai_service.trace.schema.admin import MonitorCleanupSummary, MonitorCleanupTableResult
 from db.postgres.postgres_client import get_postgres_pool
 
-CHAT_HISTORY_RETENTION_DAYS = 3
-_CHAT_HISTORY_CLEANUP_INTERVAL_SECONDS = 86400  # 24 hours
-
-# ── periodic task holders ──────────────────────────────────────────────────
-_CLEANUP_TASK: asyncio.Task | None = None
-_CLEANUP_INTERVAL_SECONDS = 300  # 5 minutes
-
 
 class MonitorMaintenanceService(BaseComponent):
-    """trace 周期维护（telemetry 保留期 + chat 历史清理），后台任务生命周期由组件钩子管理。"""
+    """telemetry 保留期清理服务（无后台任务，由 retention scheduler 或管理端 API 触发）。"""
 
     name = ComponentType.TRACE_MAINTENANCE
 
@@ -33,53 +25,6 @@ class MonitorMaintenanceService(BaseComponent):
 
     def init_app(self, system_app: SystemApp) -> None:
         self.system_app = system_app
-
-    async def async_before_start(self) -> None:
-        await self.start_periodic_maintenance()
-
-    async def async_before_stop(self) -> None:
-        await self.stop_periodic_maintenance()
-
-    # ── chat message DB cleanup ───────────────────────────────────────────
-
-    async def cleanup_chat_messages(self, retention_days: int = CHAT_HISTORY_RETENTION_DAYS) -> int:
-        """Delete chat_message rows older than retention_days. Returns deleted rows."""
-        from codegenx.ai_service.chat_message import get_chat_message_store
-
-        cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=retention_days)
-        try:
-            deleted = await get_chat_message_store().delete_before(cutoff)
-        except Exception as exc:
-            log.warning("cleanup_chat_messages failed: {}", exc)
-            return 0
-        if deleted:
-            log.info("cleanup_chat_messages: removed {} expired rows (retention={}d)", deleted, retention_days)
-        return deleted
-
-    # ── periodic maintenance entry-point ──────────────────────────────────
-
-    async def start_periodic_maintenance(self, interval_seconds: int = _CLEANUP_INTERVAL_SECONDS) -> None:
-        """Launch the background task that runs retention cleanup on a timer."""
-        global _CLEANUP_TASK
-        if _CLEANUP_TASK is not None and not _CLEANUP_TASK.done():
-            return  # already running
-
-        _CLEANUP_TASK = asyncio.create_task(
-            _periodic_maintenance_loop(interval_seconds=interval_seconds),
-            name="trace-periodic-maintenance",
-        )
-        log.info("Trace periodic maintenance started (interval={}s)", interval_seconds)
-
-    async def stop_periodic_maintenance(self) -> None:
-        global _CLEANUP_TASK
-        if _CLEANUP_TASK is not None and not _CLEANUP_TASK.done():
-            _CLEANUP_TASK.cancel()
-            with __import__("contextlib", fromlist=["suppress"]).suppress(asyncio.CancelledError):
-                await _CLEANUP_TASK
-            _CLEANUP_TASK = None
-            log.info("Trace periodic maintenance stopped")
-
-    # ── telemetry retention cleanup ───────────────────────────────────────
 
     async def cleanup_history(self, *, retention_days: int = 7, dry_run: bool = False) -> MonitorCleanupSummary:
         """按保留期清理 telemetry（先 spans 后 traces，同一 trace 随主行删除）。"""
@@ -159,56 +104,12 @@ class MonitorMaintenanceService(BaseComponent):
 
 
 def get_monitor_maintenance_service() -> MonitorMaintenanceService:
-    """取 trace 周期维护组件（经全局容器查表；容器未初始化时 fail fast）。"""
+    """取 trace 维护组件（经全局容器查表；容器未初始化时 fail fast）。"""
     from codegenx.ai_service.system_app import get_app
 
     return MonitorMaintenanceService.get_instance(get_app())
 
 
 def initialize_trace_maintenance(system_app: SystemApp) -> MonitorMaintenanceService:
-    """注册 trace 周期维护组件（system_app.initialize_components 调用）。"""
+    """注册 trace 维护组件（system_app.initialize_components 调用）。"""
     return system_app.register(MonitorMaintenanceService)
-
-
-# ── internal loop ──────────────────────────────────────────────────────────
-
-async def _periodic_maintenance_loop(*, interval_seconds: int) -> None:
-    """Run chat history + telemetry retention cleanup on a timer."""
-    service = get_monitor_maintenance_service()
-    _last_chat_history_cleanup: datetime | None = None
-
-    while True:
-        try:
-            await asyncio.sleep(interval_seconds)
-            now = datetime.now(UTC)
-
-            # 1) Chat message cleanup (once per day)
-            if _last_chat_history_cleanup is None or \
-               (now - _last_chat_history_cleanup).total_seconds() >= _CHAT_HISTORY_CLEANUP_INTERVAL_SECONDS:
-                chat_deleted = await service.cleanup_chat_messages()
-                _last_chat_history_cleanup = now
-            else:
-                chat_deleted = 0
-
-            # 2) telemetry retention cleanup
-            result = await service.cleanup_history(retention_days=7, dry_run=False)
-            if result.status == "success":
-                log.info(
-                    "Periodic maintenance: chat_messages_deleted={} telemetry_deletedRows={}",
-                    chat_deleted, result.deleted_rows,
-                )
-            else:
-                failed = [
-                    "{}: {}".format(r.table_name, r.error_message)
-                    for r in (result.table_results or [])
-                    if r.status == "error"
-                ]
-                log.warning(
-                    "Periodic maintenance: chat_messages_deleted={} telemetry_status={} deletedRows={} failed_tables=[{}]",
-                    chat_deleted, result.status, result.deleted_rows, "; ".join(failed),
-                )
-
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            log.exception("Periodic maintenance iteration failed")

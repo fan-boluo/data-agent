@@ -109,12 +109,20 @@ class SkillManager(BaseComponent):
 
     # ------------------------------------------------------------------ prompt
 
-    def build_prompt(self, allowlist: list[str] | None = None) -> str:
-        """skill 目录 prompt（P4：allowlist 过滤智能体可见范围；None=全量）。"""
+    def build_prompt(self, allowlist: list[str] | None = None,
+                     disabled: set[str] | None = None) -> str:
+        """skill 目录 prompt（P4：allowlist 过滤智能体可见范围）。
+
+        - None=全量；空列表=不注入任何 skill（与 tools 白名单 None=全量/[]=无 差异化语义对齐）；
+        - disabled=项目运行时不可用的 skill（平台总开关关闭 / 项目授权关闭），先剔除。
+        """
         skills = self.all()
         if not skills:
             return ""
+        if allowlist is not None and not [str(n).strip() for n in allowlist if str(n).strip()]:
+            return ""  # 空白名单：该 agent 不开放任何 skill
         allowed = {str(n).strip().lower() for n in (allowlist or []) if str(n).strip()}
+        disabled_names = {str(n).strip().lower() for n in (disabled or set()) if str(n).strip()}
         skill_list = [
             {
                 "name": skill.name,
@@ -122,6 +130,7 @@ class SkillManager(BaseComponent):
             }
             for skill in skills
             if getattr(skill, "name", None)
+            and skill.name.strip().lower() not in disabled_names
             and (not allowed or skill.name.strip().lower() in allowed)
         ]
         return json.dumps(skill_list, ensure_ascii=False, indent=2)

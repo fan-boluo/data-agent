@@ -2,7 +2,7 @@
 记忆条目数据模型 —— PostgreSQL agent_memory 真源（设计方案 v2.1）的行结构与常量。
 
 一条记忆的落点（v2.1 起真源为 PostgreSQL，json 文件降级为只读迁移源/导出视图）：
-  - memory.agent_memory（唯一真源，hot/warm 同表分层，memory_layer 区分）
+  - agent.agent_memory（唯一真源，hot/warm 同表分层，memory_layer 区分）
   - 向量即同表 embedding 列（pgvector，HNSW 余弦索引，仅 warm 行非空）
 
 ULID（memory_id 业务主键）：48bit 毫秒时间戳 + 80bit 随机，字典序即时间序，

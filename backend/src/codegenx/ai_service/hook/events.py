@@ -56,6 +56,10 @@ class EventDefinition:
 
 
 EVENT_DEFINITIONS: dict[str, EventDefinition] = {
+    HookEvent.ON_USER_INPUT: EventDefinition(
+        HookEvent.ON_USER_INPUT, DispatchMode.SERIAL, True, ErrorPolicy.BLOCKED,
+        ("user_input",), "用户输入进入系统：输入安全检查，可 blocked",
+    ),
     HookEvent.SESSION_START: EventDefinition(
         HookEvent.SESSION_START, DispatchMode.SERIAL, False, ErrorPolicy.RAISE,
         ("session",), "会话首次创建：初始化会话级对象、上报监控",

@@ -39,6 +39,27 @@ const router = createRouter({
       component: () => import('@/pages/admin/ToolStatsPage.vue'),
     },
     {
+      path: '/admin/eval/agent',
+      name: 'Agent运行评估',
+      component: () => import('@/pages/admin/AgentRunEvalPage.vue'),
+    },
+    {
+      path: '/admin/eval/dataset',
+      name: '标准数据集评估',
+      component: () => import('@/pages/admin/DatasetEvalPage.vue'),
+    },
+    {
+      path: '/admin/platformResource',
+      name: '平台资源',
+      component: () => import('@/pages/admin/PlatformResourcePage.vue'),
+    },
+    {
+      // App owner 视角：先选项目，再在 Tool/Skill 两个 Tab 里开关授权
+      path: '/app/grant',
+      name: '应用授权',
+      component: () => import('@/pages/app/AppGrantPage.vue'),
+    },
+    {
       // 裸 /app/chat（无项目 id）没有入口场景，统一回首页；带 id 的走下面的工作台路由
       path: '/app/chat',
       redirect: '/',

@@ -2,6 +2,16 @@
 
 执行前的确定性检查（存在性/配额/路径/熔断可用性/HITL 审批）都在 hook，执行器只负责
 执行与记账；入参注入见本文件的 `inject_tool_context` / `build_call_kwargs`。
+
+并行化要点（P1-2）：
+- 全局并行由 config.tools.execution_mode 开关驱动，默认 parallel；sequential 保留方便切换。
+- 两级进程级信号量隔离死锁：
+    * agent_slots  —— dispatch_agent 专用（多 agent.max_parallel）；
+    * tool_slots   —— 其余工具含子 agent 内部工具（tools.max_concurrency）。
+  子 agent 不能再派发子 agent，嵌套深度恒为 1，不会环形死锁。
+- 同批参数相同的 tool_call 复用同一份执行结果（parallel 用 asyncio.Task 缓存防竞态，
+  sequential 用普通 dict 即可）。
+- 停止信号（TurnStoppedError/CancelledError）透传终止请求，不吞成工具失败。
 """
 
 from __future__ import annotations
@@ -16,6 +26,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from codegenx.ai_service.component import BaseComponent, ComponentType
 from codegenx.ai_service.tools.base import ToolResult
+from codegenx.ai_service.agent.agent_schema import AgentEventType, AgentState
 from codegenx.ai_service.agent.runtime_schema import RuntimeSessionState, TurnStoppedError
 # 工具执行前的确定性检查（存在性/配额/路径/熔断可用性/HITL 审批）均为
 # BEFORE_TOOL_CALL 监听器，import 即完成注册；执行器只做执行与记账
@@ -36,10 +47,6 @@ from shared import log
 if TYPE_CHECKING:
     from codegenx.ai_service.system_app import SystemApp
 
-# 长耗时可并行工具（如 dispatch_agent 派发子智能体）：同轮多次调用 = 并行执行
-# （gather + multi_agents.max_parallel 信号量限流）；其余工具保持串行
-# （run_python 等共享执行容器，并行会冲突）
-PARALLEL_TOOL_NAMES = {"dispatch_agent"}
 
 # 工具入参注入：只补 session_id。
 # 约定：工具不接收业务上下文（app_id/user_id/当前数据集等），执行器只告诉工具
@@ -47,17 +54,16 @@ PARALLEL_TOOL_NAMES = {"dispatch_agent"}
 
 
 def inject_tool_context(
-    tool_input: dict[str, Any], session_state: "RuntimeSessionState | None",
+    tool_input: dict[str, Any], session_state: "RuntimeSessionState",
 ) -> dict[str, Any]:
     """注入 session_id（LLM 显式传入时保留），其余上下文由工具自行按会话解析。"""
-    if session_state is not None:
-        tool_input.setdefault("session_id", session_state.session_id)
+    tool_input.setdefault("session_id", session_state.session_id)
     return tool_input
 
 
 def build_call_kwargs(
     func: Callable, tool_input: dict[str, Any],
-    session_state: "RuntimeSessionState | None", stop_signal: Any,
+    session_state: RuntimeSessionState, stop_signal: Any,
 ) -> dict[str, Any]:
     """按工具签名组装执行参数：声明了 signal/session_state 的工具才注入。
 
@@ -72,23 +78,34 @@ def build_call_kwargs(
         kwargs["session_state"] = session_state
     return kwargs
 
+
 class ToolExecutor(BaseComponent):
     """工具执行器：统一执行 LLM 返回的 tool_calls，转换为可回填对话的 tool 消息。
 
     职责边界（执行前的校验/权限/审批都在 hook，不在这里）：
-    - dispatch_tool_calls：BaseReActAgent 工具循环的调度入口（并行/去重/顺序回填）
-    - execute：注入 session_id → 分发 BEFORE 守卫 → 熔断准入 → 执行 → 记账 → AFTER 观测
+    - dispatch_tool_calls：BaseReActAgent 工具循环的调度入口（按 config.tools.execution_mode
+      分流到 execute_parallel / execute_sequence）；
+    - execute：注入 session_id → BEFORE 守卫 → 熔断准入 → 执行 → 记账 → AFTER 观测；
+    - 进程级两级信号量在 init_app 初始化，dispatch_agent 占 agent_slots，其余占 tool_slots。
     """
 
-    # 组件名：system_app.tools_executor 属性按此名取实例
     name = ComponentType.Tool_EXECUTOR
+
+    # 单个工具结果回填对话的最大字符数（防止撑爆上下文）
+    MAX_TOOL_RESULT_CHARS = 8000
 
     def __init__(self, system_app: "SystemApp | None" = None):
         super().__init__(system_app)
+        # 进程级两级信号量：子 agent 不派发子 agent，嵌套深度 1 无环，不会死锁
+        self._agent_slots: asyncio.Semaphore = asyncio.Semaphore(1)
+        self._tool_slots: asyncio.Semaphore = asyncio.Semaphore(1)
 
     def init_app(self, system_app: "SystemApp") -> None:
-        # 无状态服务类，仅持有容器引用（工具查找时经 get_app() 取注册表）
         self.system_app = system_app
+        # 子agent并行数：3
+        self._agent_slots = asyncio.Semaphore(max(1, int(config.multi_agents.max_parallel)))
+        # 工具执行并发上限（含子 agent 内部工具) 默认5
+        self._tool_slots = asyncio.Semaphore(max(1, int(config.tools.max_concurrency)))
 
     async def async_before_start(self) -> None:
         """预热：为已注册工具创建熔断器，启动后 /metrics 即可看到全部工具状态。"""
@@ -96,24 +113,84 @@ class ToolExecutor(BaseComponent):
             for tool in get_app().tool_registry.tools:
                 get_tool_breaker(str(tool.name))
             log.info("[tool_breaker] 预热完成，共 {} 个工具熔断器", len(get_app().tool_registry.tools))
-        except Exception as exc:  # 预热失败不阻断启动，首次真实调用再建
+        except Exception as exc:
             log.warning("[tool_breaker] 预热失败（不阻断启动）: {}", exc)
 
-    # 单个工具结果回填对话的最大字符数（防止撑爆上下文）
-    MAX_TOOL_RESULT_CHARS = 8000
-
+    # ------------------------------------------------------------------ 调度入口
     async def dispatch_tool_calls(
-        self, tool_calls: list[dict[str, Any]] | None,
-        session_state: RuntimeSessionState | None = None,
+        self, tool_calls: list[dict[str, Any]],
+        session_state: RuntimeSessionState,
     ) -> list[dict[str, Any]]:
-        """执行 tool_calls 列表，返回 [{"role": "tool", ...}] 消息列表（与 tool_calls 顺序对应）。
+        """按 config.tools.execution_mode 分流调度器（parallel=全部并行，sequential=全部串行）。"""
+        mode = str(config.tools.execution_mode or "parallel").strip().lower()
+        if mode == "sequential":
+            return await self.execute_sequence(tool_calls, session_state)
+        return await self.execute_parallel(tool_calls, session_state)
 
-        - PARALLEL_TOOL_NAMES 内的长耗时工具（如 dispatch_agent）同轮多次调用
-          并行执行（gather + multi_agents.max_parallel 信号量限流），其余串行；
-        - 同批参数完全相同的 tool_call 只执行一次、结果复用（防 LLM 重复调用）；
-        - 停止信号（TurnStoppedError/CancelledError）透传终止请求，不吞成工具失败。
+    # ------------------------------------------------------------------ 两版调度器
+    async def execute_parallel(
+        self, tool_calls: list[dict[str, Any]],
+        session_state: RuntimeSessionState,
+    ) -> list[dict[str, Any]]:
+        """并行版：全部工具 gather + future 去重 + tool_slots 限流。
+
+        dispatch_agent（长耗时派发）额外 agent_slots 限流，防嵌套死锁。
         """
-        # 归一化：(name, arguments, tool_call_id, 去重 key)
+        normalized = self._normalize_and_dedupe(tool_calls)
+        # future 缓存：首见 key 创建 task，后来者 await 同一 task 防并发竞态
+        cache: dict[str, asyncio.Task[ToolResult]] = {}
+
+        async def _run_one(name: str, arguments: dict, tc_id: str, key: str) -> ToolResult:
+            task = cache.get(key)
+            if task is None:
+                task = asyncio.create_task(
+                    self.execute({"name": name, "arguments": arguments, "id": tc_id}, session_state)
+                )
+                cache[key] = task
+            # 停止信号透传；普通异常收口为失败结果（由 execute 内部处理）
+            return await task
+
+        async def _throttled(item) -> tuple[str, ToolResult]:
+            name, arguments, tc_id, key = item
+            # dispatch_agent 只占 agent_slots（不占 tool_slots），否则同轮多个派发会把
+            # 工具席位吃光，子 agent 内部工具等不到席位 → 嵌套死锁
+            if name == "dispatch_agent":
+                async with self._agent_slots:
+                    return tc_id, await _run_one(name, arguments, tc_id, key)
+            async with self._tool_slots:
+                return tc_id, await _run_one(name, arguments, tc_id, key)
+
+        # gather 任一工具抛 TurnStoppedError/CancelledError 整体取消；普通异常已收口为 ToolResult
+        results_by_id: dict[str, ToolResult] = {}
+        for tc_id, result in await asyncio.gather(*(_throttled(t) for t in normalized)):
+            results_by_id[tc_id] = result
+        return self._build_tool_messages(normalized, results_by_id)
+
+    async def execute_sequence(
+        self, tool_calls: list[dict[str, Any]],
+        session_state: RuntimeSessionState,
+    ) -> list[dict[str, Any]]:
+        """顺序版：for 循环串行执行 + tool_slots 限流 + 去重（dict 缓存即可，无并发竞态）。"""
+        normalized = self._normalize_and_dedupe(tool_calls)
+        cache: dict[str, ToolResult] = {}
+        results_by_id: dict[str, ToolResult] = {}
+        for name, arguments, tc_id, key in normalized:
+            if key in cache:
+                results_by_id[tc_id] = cache[key]
+                continue
+            async with self._tool_slots:
+                result = await self.execute(
+                    {"name": name, "arguments": arguments, "id": tc_id}, session_state)
+            cache[key] = result
+            results_by_id[tc_id] = result
+        return self._build_tool_messages(normalized, results_by_id)
+
+    # ------------------------------------------------------------------ 公共 helper
+    @staticmethod
+    def _normalize_and_dedupe(
+        tool_calls: list[dict[str, Any]],
+    ) -> list[tuple[str, dict, str, str]]:
+        """归一化：(name, arguments, tool_call_id, 去重 key)；同批完全相同参数只执行一次。"""
         normalized: list[tuple[str, dict, str, str]] = []
         for tc in tool_calls or []:
             name = str(tc.get("name") or "")
@@ -127,42 +204,13 @@ class ToolExecutor(BaseComponent):
             # 去重 key：参数序列化后剔除全部空白（仅空白差异视为同一调用）
             key = re.sub(r"\s+", "", name + "|" + json.dumps(arguments, sort_keys=True, ensure_ascii=False))
             normalized.append((name, arguments, str(tc.get("id") or ""), key))
+        return normalized
 
-        # 同批去重缓存：key → 执行结果（asyncio 单线程，闭包 dict 并发安全）
-        cache: dict[str, ToolResult] = {}
-
-        async def _run_one(name: str, arguments: dict, tc_id: str, key: str) -> ToolResult:
-            if key in cache:
-                return cache[key]
-            try:
-                result = await self.execute(
-                    {"name": name, "arguments": arguments, "id": tc_id}, session_state)
-            except (TurnStoppedError, asyncio.CancelledError):
-                raise  # 停止信号传播终止请求
-            except Exception as exc:
-                log.error("工具 {} 执行异常: {}", name, exc)
-                result = ToolResult(success=False, message=str(exc))
-            cache[key] = result
-            return result
-
-        results_by_id: dict[str, ToolResult] = {}
-        # 并行组：长耗时工具 gather 执行（信号量限流；停止信号经 gather 传播）
-        parallel = [t for t in normalized if t[0] in PARALLEL_TOOL_NAMES]
-        if parallel:
-            semaphore = asyncio.Semaphore(max(1, int(config.multi_agents.max_parallel)))
-
-            async def _one(item):
-                async with semaphore:
-                    return item[2], await _run_one(*item)
-
-            for tc_id, result in await asyncio.gather(*(_one(i) for i in parallel)):
-                results_by_id[tc_id] = result
-        # 串行组：其余工具顺序执行
-        for name, arguments, tc_id, key in normalized:
-            if tc_id not in results_by_id:
-                results_by_id[tc_id] = await _run_one(name, arguments, tc_id, key)
-
-        # 统一转换为 tool 消息（按原 tool_calls 顺序）
+    def _build_tool_messages(
+        self, normalized: list[tuple[str, dict, str, str]],
+        results_by_id: dict[str, ToolResult],
+    ) -> list[dict[str, Any]]:
+        """按 normalized 顺序把 ToolResult 转换为 tool 消息（与 tool_calls 顺序对应）。"""
         results: list[dict[str, Any]] = []
         for name, _arguments, tc_id, _key in normalized:
             result = results_by_id[tc_id]
@@ -183,23 +231,27 @@ class ToolExecutor(BaseComponent):
             })
         return results
 
+    # ------------------------------------------------------------------ 单工具执行入口
     async def execute(self, tool_call: dict[str, Any],
-                      session_state: RuntimeSessionState | None = None) -> ToolResult:
+                      session_state: RuntimeSessionState) -> ToolResult:
         """单工具执行入口：注入上下文 → BEFORE 守卫 → 熔断准入 → 执行 → 记账 → AFTER 观测。
 
         - BEFORE：serial + 可短路（许可规则/HITL 审批等），blocked 时直接把消息回填为失败结果；
         - 熔断：守卫已做可用性快判，这里 acquire 负责半开探测名额；
         - trace：with start_span 包裹执行骨架（op_type=注册表 obs_category），
-          入参/结果明细由 AFTER_TOOL_CALL 监听器落 telemetry.tool_semantics。
+          入参/结果明细由 AFTER_TOOL_CALL 监听器落 telemetry.tool_semantics；
+        - SSE 事件：TOOL_EXECUTION_START 找到工具后发、TOOL_EXECUTION_END 在所有 return 路径发
+          （含 blocked/circuit_open/tool_not_found 三种执行前失败态），前端实时感知工具生命周期。
         """
         tool_name = str(tool_call.get("name") or "")
         tool_input = inject_tool_context(dict(tool_call.get("arguments") or {}), session_state)
-        app_id = str(session_state.request.app_id) if session_state is not None and session_state.request is not None else "main"
-        session_id = getattr(session_state, "session_id", "") if session_state is not None else ""
-        stop_signal = getattr(session_state, "stop_signal", None) if session_state is not None else None
+        app_id = str(session_state.request.app_id) if session_state.request is not None else "main"
+        session_id = getattr(session_state, "session_id", "")
+        stop_signal = getattr(session_state, "stop_signal", None)
+        tool_call_id = str(tool_call.get("id") or "")
 
         # 1. BEFORE_TOOL_CALL 守卫（入参注入后触发，守卫能看到完整参数）
-        turn = getattr(session_state, "activate_turn", None) if session_state is not None else None
+        turn = getattr(session_state, "activate_turn", None)
         before_ctx = HookContext(event=HookEvent.BEFORE_TOOL_CALL, session=session_state, turn=turn)
         before_ctx.data["tool_call"] = {**tool_call, "arguments": tool_input}
         await hook_manager.dispatch(HookEvent.BEFORE_TOOL_CALL, before_ctx)
@@ -208,17 +260,17 @@ class ToolExecutor(BaseComponent):
         if isinstance(override, dict) and override:
             tool_input.update(override)
             before_ctx.data["tool_call"] = {**tool_call, "arguments": tool_input}
+
+        # ── 执行前失败：只发 END（失败态），不发 START ──
         if before_ctx.action == "blocked":
             error_class = str(before_ctx.data.get("error_class") or "arg_invalid")
             log.info("工具 {} 被 BEFORE_TOOL_CALL 守卫阻断: {}", tool_name, before_ctx.message)
-            # 守卫阻断同样是一次失败调用（参数/权限/审批/配额/熔断），补打点避免静默
             feed_tool_call(app_id=app_id, session_id=session_id, tool_name=tool_name,
                            is_error=True, latency_ms=0.0, error_class=error_class)
-            return ToolResult(
-                success=False,
-                error_class=error_class,
-                message=before_ctx.message or "Tool blocked by hook",
-            )
+            r = ToolResult(success=False, error_class=error_class,
+                           message=before_ctx.message or "Tool blocked by hook")
+            await self._publish_tool_end(session_state, tool_name, tool_call_id, r, state=AgentState.FAILED)
+            return r
 
         # 2. 查找工具（存在性已由守卫校验，这里只做兜底）
         tool = next((t for t in get_app().tool_registry.tools if t.name == tool_name), None)
@@ -226,7 +278,9 @@ class ToolExecutor(BaseComponent):
             log.error("Unknown tool called after guard: {}", tool_name)
             feed_tool_call(app_id=app_id, session_id=session_id, tool_name=tool_name or "unknown",
                            is_error=True, latency_ms=0.0, error_class="arg_invalid")
-            return ToolResult(success=False, message=f"工具「{tool_name}」不存在，本次调用未执行。")
+            r = ToolResult(success=False, message=f"工具「{tool_name}」不存在，本次调用未执行。")
+            await self._publish_tool_end(session_state, tool_name, tool_call_id, r, state=AgentState.FAILED)
+            return r
 
         # 3. 熔断准入（守卫已对冷却期内的 open 态快速失败，这里只占半开探测名额）
         if not await acquire_slot(tool_name):
@@ -234,10 +288,13 @@ class ToolExecutor(BaseComponent):
                            is_error=True, latency_ms=0.0, error_class="circuit_open")
             log.warning("[tool_call] tool={} status=circuit_open app_id={} session_id={}",
                         tool_name, app_id, session_id)
-            return ToolResult(
-                success=False,
-                message=f"工具 {tool_name} 暂时不可用（熔断打开），请稍后重试或改用其他工具",
-            )
+            r = ToolResult(success=False, error_class="circuit_open",
+                           message=f"工具 {tool_name} 暂时不可用（熔断打开），请稍后重试或改用其他工具")
+            await self._publish_tool_end(session_state, tool_name, tool_call_id, r, state=AgentState.FAILED)
+            return r
+
+        # ── 找到工具，开始执行：先发 START ──
+        await self._publish_tool_start(session_state, tool_name, tool_call_id, tool_input)
 
         # 4. 工具执行（trace 直埋：注册表 obs_category 决定 op_type——tool/retrieval；
         #    with 块天然维护 parent 栈，工具内派发的子 agent/llm span 挂本 span 下）
@@ -249,31 +306,40 @@ class ToolExecutor(BaseComponent):
         t0 = time.monotonic()
         error_class = ""
         # tool span input 携带 LLM 调用 id（协议溯源，与 llm span output.tool_calls[].id 对账）
-        span_input = {"tool_call_id": str(tool_call.get("id") or ""), **tool_input}
-        async with start_span(str(tool.obs_category or "tool"), tool_name,
-                              input_data=span_input) as span:
-            try:
-                result = func(**call_kwargs)
-                if inspect.isawaitable(result):
-                    result = await asyncio.wait_for(result, timeout)
-            except (TurnStoppedError, asyncio.CancelledError):
-                await release_slot(tool_name)  # 取消无结果：归还半开探测名额
-                raise
-            except Exception as exc:
-                # 异常统一收口为失败结果：后续指标/日志/熔断记账不会被跳过
-                error_class = "timeout" if isinstance(exc, (asyncio.TimeoutError, TimeoutError)) else "execution"
-                log.warning("[tool_call] tool={} status=error class={} app_id={} session_id={} err={}: {}",
-                            tool_name, error_class, app_id, session_id, type(exc).__name__, exc)
-                result = ToolResult(success=False, message=f"{type(exc).__name__}: {exc}")
-            # 骨架收尾：输出概要 + 成败（语义字段由 AFTER 监听器单独落表）
-            message = str(getattr(result, "message", "") or "")
-            span.set_output({
-                "success": bool(result.success),
-                "message": message,
-                "data": str(getattr(result, "data", "") or ""),
-            })
-            span.set_status(ok=bool(result.success), error=message or None)
-            span_id = span.span["span_id"] if span.span else None
+        span_input = {"tool_call_id": tool_call_id, **tool_input}
+
+        result: ToolResult
+        span_id: str | None = None
+        try:
+            async with start_span(str(tool.obs_category or "tool"), tool_name,
+                                  input_data=span_input) as span:
+                try:
+                    result = func(**call_kwargs)
+                    if inspect.isawaitable(result):
+                        result = await asyncio.wait_for(result, timeout)
+                except (TurnStoppedError, asyncio.CancelledError):
+                    await release_slot(tool_name)  # 取消无结果：归还半开探测名额
+                    raise
+                except Exception as exc:
+                    # 异常统一收口为失败结果：后续指标/日志/熔断记账不会被跳过
+                    error_class = "timeout" if isinstance(exc, (asyncio.TimeoutError, TimeoutError)) else "execution"
+                    log.warning("[tool_call] tool={} status=error class={} app_id={} session_id={} err={}: {}",
+                                tool_name, error_class, app_id, session_id, type(exc).__name__, exc)
+                    result = ToolResult(success=False, message=f"{type(exc).__name__}: {exc}")
+                # 骨架收尾：输出概要 + 成败（语义字段由 AFTER 监听器单独落表）
+                message = str(getattr(result, "message", "") or "")
+                span.set_output({
+                    "success": bool(result.success),
+                    "message": message,
+                    "data": str(getattr(result, "data", "") or ""),
+                })
+                span.set_status(ok=bool(result.success), error=message or None)
+                span_id = span.span["span_id"] if span.span else None
+        finally:
+            # TurnStoppedError/CancelledError 会跳过 finally 里的后续记账（下面 return 之前还有步骤），
+            # 但这两个异常会在 execute_parallel 的 gather 层被捕获并透传，
+            # 不影响前端收到前面已发的 START 事件（结束态由上层 REQUEST_STOPPED 兜底）
+            pass
 
         # 5. 熔断记账 + 失败分类归一（口径见 tool_circuit.record_outcome）
         error_class = error_class or str(getattr(result, "error_class", "") or "")
@@ -297,7 +363,81 @@ class ToolExecutor(BaseComponent):
         after_ctx.data["span_id"] = span_id
         await hook_manager.dispatch(HookEvent.AFTER_TOOL_CALL, after_ctx)
 
+        # ── 执行结束：发 END（成功或失败） ──
+        state = AgentState.SUCCESS if result.success else AgentState.FAILED
+        await self._publish_tool_end(session_state, tool_name, tool_call_id, result, state=state)
+
         return result
+
+    # ------------------------------------------------------------------ 前端感知事件
+    @staticmethod
+    async def _publish_tool_start(
+        session_state: RuntimeSessionState,
+        tool_name: str, tool_call_id: str, tool_input: dict,
+    ) -> None:
+        """工具开始执行事件（前端感知"正在执行什么工具"）。
+
+        延迟 import + 吞异常：事件发送失败不影响执行链路。
+        """
+        try:
+            from codegenx.ai_service.system_app import get_app
+            await get_app().message_bus.publish_runtime_event(
+                session_state.publish_context,
+                event_type=AgentEventType.TOOL_EXECUTION_START,
+                state=AgentState.RUNNING,
+                data={"name": tool_name, "id": tool_call_id, "arguments": tool_input},
+            )
+        except Exception as exc:
+            log.warning("TOOL_EXECUTION_START 发布失败: {}", exc)
+
+    @staticmethod
+    async def _publish_tool_end(
+        session_state: RuntimeSessionState,
+        tool_name: str, tool_call_id: str,
+        result: ToolResult, state: AgentState,
+    ) -> None:
+        """工具执行结束事件（前端感知"工具执行完毕，成功/失败"）。"""
+        try:
+            from codegenx.ai_service.system_app import get_app
+            from codegenx.ai_service.agent.agent_schema import MessageType
+
+            extras = getattr(result, "extras", None) or {}
+            images = list(extras.get("images") or [])
+            report = extras.get("report")
+            chart_option = extras.get("chart_option")
+            data = {
+                "name": tool_name,
+                "tool_call_id": tool_call_id,
+                "success": bool(result.success),
+                "message": str(getattr(result, "message", "") or ""),
+                "error_class": str(getattr(result, "error_class", "") or ""),
+                "state": "success" if result.success else "failed",
+                "render": str(getattr(result, "render", "") or ""),
+                # chart_option：ECharts 配置（前端交互式渲染）；images：普通图片相对路径
+                "chart_option": chart_option,
+                "images": images,
+                "report": report,
+            }
+            # 消息类型推断：报告 > 交互式图表 > 普通图片 > 纯文本
+            if not result.success:
+                message_type = MessageType.TEXT
+            elif report:
+                message_type = MessageType.REPORT
+            elif chart_option:
+                message_type = MessageType.CHART
+            elif images:
+                message_type = MessageType.IMAGE
+            else:
+                message_type = MessageType.TEXT
+            await get_app().message_bus.publish_runtime_event(
+                session_state.publish_context,
+                event_type=AgentEventType.TOOL_EXECUTION_END,
+                state=state,
+                data=data,
+                message_type=message_type,
+            )
+        except Exception as exc:
+            log.warning("TOOL_EXECUTION_END 发布失败: {}", exc)
 
 
 def initialize_tool_executor(system_app) -> ToolExecutor:

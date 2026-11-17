@@ -16,10 +16,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
-
 from codegenx.ai_service.api.memory_router import memory_admin_router
 from codegenx.ai_service.api.eval_router import eval_router
 from codegenx.app_service.router import router as app_router
+from codegenx.resource_service.router import router as resource_router
 from codegenx.gateway.api.blacklist import router as blacklist_router
 from codegenx.gateway.api.chat import router as chat_router
 from codegenx.gateway.api.health import router as health_router
@@ -139,13 +139,13 @@ def create_app() -> FastAPI:
         )
 
     from codegenx.ai_service.api.router import (
-        chat_router as ai_chat_router,
-        metrics_router,
-        monitor_router,
+        chat_router as ai_chat_router
     )
+    from codegenx.ai_service.api.monitor_router import monitor_router,metrics_router
     app.include_router(health_router, prefix=settings.app_base_path)
     app.include_router(user_router, prefix=settings.app_base_path)
     app.include_router(app_router, prefix=settings.app_base_path)
+    app.include_router(resource_router, prefix=settings.app_base_path)
     app.include_router(ai_chat_router, prefix=settings.app_base_path)
     app.include_router(chat_router, prefix=settings.app_base_path)
     app.include_router(blacklist_router, prefix=settings.app_base_path)

@@ -74,6 +74,10 @@ class LeaderAgent(BaseReActAgent):
             # ── 防循环约束 ──
             "回传结果出现矛盾时：最多派发一次口径明确的核实任务（一次性取全口径数据，描述必须与原任务不同），核实结果回填后必须直接汇总作答，禁止以格式不符等理由对同一智能体重复派发相同或相似任务。",
             "已派发过的任务不要重复派发：其执行结果已在对话中（工具结果），基于已有结果继续决策或汇总作答即可。",
+            # ── 分析产出约束（P0-4：图表与报告统一由 reporter 子智能体承担） ──
+            "分析类问题（趋势/对比/占比/排名等）需要出图或生成报告时，派发 reporter 子智能体：把任务要求、"
+            "已有数据结论/聚合结果一并写进 task（reporter 不重复查数），由其规划图表、逐张出图并生成 Markdown 报告；"
+            "拿到回传的报告路径+图表清单+结论后汇总作答。只报数字不给图表与结论视为未完成分析。",
         ],
         resource_prompt="可用资源如下：\n 有权限文件夹:{{available_file_path}}\n数据集:{{available_db}}",
         expand_prompt=(
@@ -83,7 +87,7 @@ class LeaderAgent(BaseReActAgent):
         out_schema="",
         memory_prompt= "{{memory_prompt}}",
         taskbord_prompt= "{{board_desc}}",
-        skill_prompt = "",
+        skill_prompt = "{{skill_prompt}}",
     )
 
     def __init__(self, context: CommonContext | None = None):
@@ -91,12 +95,18 @@ class LeaderAgent(BaseReActAgent):
 
     # ── prompt 构建与输入组装 ──
     @staticmethod
-    def agents_list_desc() -> str:
-        """可用智能体清单（含 planner：dispatch_agent 可派发 planner 请求规划）。"""
+    async def agents_list_desc() -> str:
+        """可用智能体清单（含 planner：dispatch_agent 可派发 planner 请求规划）。
+
+        每轮实时过滤：管理员全局停用 / 模型链全部熔断打开的子智能体不出现在清单中。
+        """
+        from codegenx.resource_service.agents import get_unavailable_agent_names
+
         skip_roles = {"leader", "supervisor", "intent_recognition"}
+        unavailable = await get_unavailable_agent_names()
         lines = []
         for spec in get_app().agents.all_specs():
-            if spec.role in skip_roles:
+            if spec.role in skip_roles or spec.name in unavailable:
                 continue
             lines.append(f"{spec.name} - {spec.desc}")
         return "\n".join(lines) or "（暂无可用子智能体）"
@@ -121,7 +131,14 @@ class LeaderAgent(BaseReActAgent):
         return "（无可用公共数据集）"
 
     async def _prepare_prompt_params(self,request) -> dict:
-        """统一 prompt 变量：智能体清单（含 planner）+ 任务看板 + 记忆/摘要注入。"""
+        """统一 prompt 变量：智能体清单（含 planner）+ 任务看板 + 记忆/摘要注入。
+
+        skill_prompt 由基类统一加载（按 agents[].skills allowlist），避免重复实现；
+        skill_prompt 作为 prompt_params 的 key 参与 token_budget 分区驱逐（预算超限
+        时被置为占位提示），不与系统提示固定耦合。
+        """
+        # 基类负责 skill_prompt 注入（与其他 agent 同口径）
+        params = await super()._prepare_prompt_params(request)
 
         # 以当前用户请求为 query 检索长期记忆；会话摘要由 compact_after_turn 后台产出
         query = str(getattr(request, "message", "") or "")
@@ -139,13 +156,14 @@ class LeaderAgent(BaseReActAgent):
             session_id=request.session_id,
         )
 
-        return {
+        params.update({
             "available_file_path":get_code_dir(request.user_id,request.app_id),
             "available_db": self._db_hint(request),
-            "agents_list_desc": self.agents_list_desc(),
+            "agents_list_desc": await self.agents_list_desc(),
             "board_desc": self._context.get_task_bord(),
             "memory_prompt": _memory_prompt or "（暂无相关记忆）",
-        }
+        })
+        return params
 
     # ── observation：终答跳（派发已在工具执行内完成，无派发跳组装） ──
 

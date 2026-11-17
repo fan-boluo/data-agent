@@ -229,6 +229,19 @@ class MonitorQueryService:
                 normalized,
             )
             stat = (await self._span_stats_by_session(conn, [normalized])).get(normalized, {})
+            # 用户输入取自 agent.chat_message（先于 turn 落库），按时间归属到各轮
+            msg_rows = await conn.fetch(
+                """
+                SELECT content->>'content' AS text, created_at
+                FROM agent.chat_message
+                WHERE session_id = $1 AND role = 'user'
+                  AND created_at >= COALESCE(
+                      (SELECT MIN(started_at) - interval '1 day' FROM telemetry.traces WHERE session_id = $1),
+                      now() - interval '1 day')
+                ORDER BY created_at
+                """,
+                normalized,
+            )
         finally:
             await self._release(conn)
 
@@ -253,8 +266,33 @@ class MonitorQueryService:
                 if sess["started_at"] else 0,
             updatedAt=sess["updated_at"],
         )
-        turns = [self._map_turn_row(row, stat) for row in turn_rows]
+        user_inputs = self._match_user_inputs(turn_rows, msg_rows)
+        turns = [
+            self._map_turn_row(row, stat, user_inputs.get(row["trace_id"], ""))
+            for row in turn_rows
+        ]
         return MonitorSessionDetail(session=session_vo, turns=turns, alerts=[])
+
+    @staticmethod
+    def _match_user_inputs(
+        turns: list[asyncpg.Record], messages: list[asyncpg.Record],
+    ) -> dict[str, str]:
+        """把用户消息按时间归属到 turn：取该轮开始前最新一条未消费的 user 消息。"""
+        ordered_turns = sorted(
+            (t for t in turns if t["started_at"]), key=lambda r: r["started_at"]
+        )
+        ordered_msgs = sorted(
+            (m for m in messages if m["created_at"]), key=lambda r: r["created_at"]
+        )
+        result: dict[str, str] = {}
+        idx = 0
+        for turn in ordered_turns:
+            picked = ""
+            while idx < len(ordered_msgs) and ordered_msgs[idx]["created_at"] <= turn["started_at"]:
+                picked = ordered_msgs[idx]["text"] or ""
+                idx += 1
+            result[turn["trace_id"]] = " ".join(picked.split())[:500]
+        return result
 
     async def get_turn_detail(self, session_id: str, turn_id: str) -> MonitorTurnSummary | None:
         conn = await self._acquire()
@@ -586,7 +624,9 @@ class MonitorQueryService:
         }
 
     @classmethod
-    def _map_turn_row(cls, row: asyncpg.Record, stat: dict[str, Any], *, detail: bool = False) -> MonitorTurnSummary:
+    def _map_turn_row(
+        cls, row: asyncpg.Record, stat: dict[str, Any], user_input: str = "", *, detail: bool = False,
+    ) -> MonitorTurnSummary:
         tags = _jload(row["tags"], {}) or {}
         return MonitorTurnSummary(
             traceId=row["trace_id"],
@@ -602,6 +642,7 @@ class MonitorQueryService:
             contextTokens=int(row["prompt_tokens"] or 0),
             contextTokenUsage=int(float(tags.get("context_usage") or 0) * 100),
             errorCount=int(stat.get("tool_errors", 0)),
+            userInput=user_input,
             startedAt=row["started_at"],
             endedAt=row["ended_at"],
             durationMs=int(row["duration_ms"] or 0),

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 from functools import lru_cache
@@ -262,7 +262,7 @@ class ChatService(BaseComponent):
         内存 chat_messages 为空即按 turn 快照回填（新建会话同样适用：上一轮 session
         可能已被空闲回收、对象已从池中移除，仅剩快照文件）。
         """
-        cm = session_state.context_manager
+        cm = session_state.context
         if cm is None or cm.chat_messages:
             return
         from codegenx.ai_service.system_app import get_app
@@ -413,4 +413,5 @@ def initialize_chat_service(system_app) -> ChatService:
     """注册全局对话引擎组件（system_app.initialize_components 调用；
     实际启动/停止在 async_before_start / async_before_stop 钩子中）。"""
     return system_app.register(ChatService)
+
 

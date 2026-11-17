@@ -38,6 +38,7 @@ from codegenx.app_service.services.access import (
 from codegenx.gateway.middleware.jwt_auth import JWTUser
 from codegenx.user_service.models.user import User
 from codegenx.app_service.services.db_manager import create_project_database, list_database_tables
+from codegenx.resource_service.store import init_app_resources
 
 
 class AppService:
@@ -65,6 +66,15 @@ class AppService:
         self.db.add(app)
         await self.db.commit()
         await self.db.refresh(app)
+
+        # 能力授权初始化：按平台已开放资源复制一份本项目的默认授权（失败不阻塞建项目）
+        try:
+            await init_app_resources(str(app.id))
+        except Exception as exc:
+            log.warning(
+                "app-service init app resources failed traceId={} appId={} error={}",
+                trace_id, app.id, exc,
+            )
 
         # 每个用户的项目目录相互隔离：.data/{userId}/{appId}/code
         code_dir = get_code_dir(login_user.user_id, app.id)

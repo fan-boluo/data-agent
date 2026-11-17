@@ -55,7 +55,7 @@ def vector_text(vec: list[float] | None) -> str:
 async def load_hot(app_id: str, user_id: str) -> list[MemoryEntry]:
     """全部 active hot 记忆（每轮对话开始全量加载注入 system prompt）。"""
     rows = await memory_fetch(
-        f"SELECT {_ROW_COLS} FROM memory.agent_memory "
+        f"SELECT {_ROW_COLS} FROM agent.agent_memory "
         "WHERE app_id = $1 AND user_id = $2 AND memory_layer = 1 AND status = 1 "
         "AND (valid_to IS NULL OR valid_to > now())",
         str(app_id), str(user_id),
@@ -66,7 +66,7 @@ async def load_hot(app_id: str, user_id: str) -> list[MemoryEntry]:
 async def count_hot_slots(app_id: str, user_id: str) -> int:
     """当前 active hot 条数（写入期硬上限检查，设计 §5.4）。"""
     val = await memory_fetchval(
-        "SELECT COUNT(*) FROM memory.agent_memory "
+        "SELECT COUNT(*) FROM agent.agent_memory "
         "WHERE app_id = $1 AND user_id = $2 AND memory_layer = 1 AND status = 1",
         str(app_id), str(user_id),
     )
@@ -114,7 +114,7 @@ async def upsert_hot_slot(
     # 两条语句同事务：先释放同槽位旧 active，再插入新 active（hot 不进向量，embedding 恒 NULL）
     async with memory_transaction() as conn:
         await conn.execute(
-            "UPDATE memory.agent_memory "
+            "UPDATE agent.agent_memory "
             "SET status = 2, active_slot = NULL, superseded_by = $1 "
             "WHERE app_id = $2 AND user_id = $3 AND subject = $4 "
             "AND memory_type = $5 AND slot_key = $6 AND active_slot = 1",
@@ -122,7 +122,7 @@ async def upsert_hot_slot(
             entry.subject, entry.memory_type, entry.slot_key,
         )
         new_id = await conn.fetchval(
-            "INSERT INTO memory.agent_memory "
+            "INSERT INTO agent.agent_memory "
             "(app_id, user_id, memory_id, memory_layer, memory_type, subject, slot_key, "
             " active_slot, summary, content, token_cost, source_type, confidence, status, "
             " session_id, source_msg_ids, task_id, source_agent) "
@@ -164,7 +164,7 @@ async def append_warm(
     entry.slot_key = entry.memory_id  # warm 槽位即自身，uk_slot 天然不冲突
     p = _insert_params(entry)
     new_id = await memory_fetchval(
-        "INSERT INTO memory.agent_memory "
+        "INSERT INTO agent.agent_memory "
         "(app_id, user_id, memory_id, memory_layer, memory_type, subject, slot_key, "
         " active_slot, summary, content, token_cost, source_type, confidence, status, "
         " session_id, source_msg_ids, task_id, source_agent, embedding) "
@@ -213,7 +213,7 @@ async def mark_inactive(
     if not memory_ids:
         return 0
     tag = await memory_execute(
-        "UPDATE memory.agent_memory "
+        "UPDATE agent.agent_memory "
         "SET status = $1, active_slot = NULL, superseded_by = $2 "
         "WHERE app_id = $3 AND user_id = $4 AND memory_id = ANY($5::text[]) AND status = 1",
         int(status), superseded_by, str(app_id), str(user_id), list(memory_ids),
@@ -243,7 +243,7 @@ async def search_by_vector(
         return []
     rows = await memory_fetch(
         f"SELECT {_ROW_COLS}, 1 - (embedding <=> $1::text::vector) AS score "
-        "FROM memory.agent_memory "
+        "FROM agent.agent_memory "
         "WHERE app_id = $2 AND user_id = $3 AND memory_layer = 2 AND status = 1 "
         "AND embedding IS NOT NULL "
         "ORDER BY embedding <=> $1::text::vector LIMIT $4",
@@ -271,7 +271,7 @@ async def search_summary_keyword(
         return []
     rows = await memory_fetch(
         f"SELECT {_ROW_COLS}, similarity(summary, $1) AS score "
-        "FROM memory.agent_memory "
+        "FROM agent.agent_memory "
         "WHERE app_id = $2 AND user_id = $3 AND memory_layer = 2 AND status = 1 "
         "AND summary % $1 "
         "ORDER BY score DESC LIMIT $4",
@@ -285,7 +285,7 @@ async def get_active_by_ids(app_id: str, user_id: str, ids: list[int]) -> list[M
     if not ids:
         return []
     rows = await memory_fetch(
-        f"SELECT {_ROW_COLS} FROM memory.agent_memory "
+        f"SELECT {_ROW_COLS} FROM agent.agent_memory "
         "WHERE id = ANY($1::bigint[]) AND app_id = $2 AND user_id = $3 "
         "AND memory_layer = 2 AND status = 1",
         [int(i) for i in ids], str(app_id), str(user_id),
@@ -302,7 +302,7 @@ async def batch_touch_hit(app_id: str, user_id: str, ids: list[int]) -> None:
         return
     try:
         await memory_execute(
-            "UPDATE memory.agent_memory SET hit_count = hit_count + 1, last_hit_at = now() "
+            "UPDATE agent.agent_memory SET hit_count = hit_count + 1, last_hit_at = now() "
             "WHERE id = ANY($1::bigint[]) AND app_id = $2 AND user_id = $3",
             [int(i) for i in ids], str(app_id), str(user_id),
         )
@@ -327,7 +327,7 @@ async def apply_hit_flush(app_id: str, user_id: str, hits: dict[str, tuple[int, 
         stamps.append(_iso_to_dt(hit_at))
     try:
         tag = await memory_execute(
-            "UPDATE memory.agent_memory AS m "
+            "UPDATE agent.agent_memory AS m "
             "SET hit_count = m.hit_count + v.c, "
             "    last_hit_at = COALESCE(v.ts, m.last_hit_at) "
             "FROM (SELECT * FROM unnest($1::text[], $2::int[], $3::timestamptz[]) "
@@ -368,10 +368,10 @@ async def merge_duplicate_warm(app_id: str, user_id: str) -> int:
     PG 无 UPDATE ... JOIN 语法，改用 UPDATE ... FROM 子查询等价的写法。
     """
     tag = await memory_execute(
-        "UPDATE memory.agent_memory AS m "
+        "UPDATE agent.agent_memory AS m "
         "SET status = 2, active_slot = NULL "
         "FROM ("
-        "  SELECT summary, MAX(id) AS keep_id FROM memory.agent_memory "
+        "  SELECT summary, MAX(id) AS keep_id FROM agent.agent_memory "
         "  WHERE app_id = $1 AND user_id = $2 AND memory_layer = 2 AND status = 1 "
         "  GROUP BY summary HAVING COUNT(*) > 1"
         ") AS d "
@@ -390,9 +390,9 @@ async def decay_warm_soft_delete(days: int, batch: int = 5000) -> int:
     PG 的 UPDATE 不支持 LIMIT，用子查询先取一批 id 再更新，避免长时间持锁。
     """
     tag = await memory_execute(
-        "UPDATE memory.agent_memory SET status = 4, active_slot = NULL "
+        "UPDATE agent.agent_memory SET status = 4, active_slot = NULL "
         "WHERE id IN ("
-        "  SELECT id FROM memory.agent_memory "
+        "  SELECT id FROM agent.agent_memory "
         "  WHERE memory_layer = 2 AND status = 1 "
         "  AND COALESCE(last_hit_at, created_at) < now() - make_interval(days => $1) "
         "  ORDER BY id LIMIT $2"
@@ -405,7 +405,7 @@ async def decay_warm_soft_delete(days: int, batch: int = 5000) -> int:
 async def scan_archivable(days: int, limit: int = 2000) -> list[MemoryEntry]:
     """归档候选：status=4 且软删后再满 N 天，valid_to IS NULL 表示尚未导出。"""
     rows = await memory_fetch(
-        f"SELECT {_ROW_COLS} FROM memory.agent_memory "
+        f"SELECT {_ROW_COLS} FROM agent.agent_memory "
         "WHERE memory_layer = 2 AND status = 4 AND valid_to IS NULL "
         "AND updated_at < now() - make_interval(days => $1) "
         "ORDER BY id LIMIT $2",
@@ -419,14 +419,14 @@ async def mark_archived_exported(ids: list[int]) -> None:
     if not ids:
         return
     await memory_execute(
-        "UPDATE memory.agent_memory SET valid_to = now() WHERE id = ANY($1::bigint[])",
+        "UPDATE agent.agent_memory SET valid_to = now() WHERE id = ANY($1::bigint[])",
         [int(i) for i in ids],
     )
 
 
 async def list_tenants() -> list[tuple[str, str]]:
     """枚举有记忆数据的 (app_id, user_id)。"""
-    rows = await memory_fetch("SELECT DISTINCT app_id, user_id FROM memory.agent_memory")
+    rows = await memory_fetch("SELECT DISTINCT app_id, user_id FROM agent.agent_memory")
     return [(str(r[0]), str(r[1])) for r in rows]
 
 
@@ -448,7 +448,7 @@ async def find_for_compliance_delete(
     else:
         raise ValueError(f"未知合规删除范围: {scope}")
     rows = await memory_fetch(
-        "SELECT id, memory_id FROM memory.agent_memory "
+        "SELECT id, memory_id FROM agent.agent_memory "
         "WHERE app_id = $1 AND user_id = $2" + where,
         str(app_id), str(user_id), *extra,
     )
@@ -460,7 +460,7 @@ async def compliance_hard_delete(app_id: str, user_id: str, ids: list[int]) -> i
     if not ids:
         return 0
     tag = await memory_execute(
-        "DELETE FROM memory.agent_memory WHERE id = ANY($1::bigint[]) AND app_id = $2 AND user_id = $3",
+        "DELETE FROM agent.agent_memory WHERE id = ANY($1::bigint[]) AND app_id = $2 AND user_id = $3",
         [int(i) for i in ids], str(app_id), str(user_id),
     )
     from codegenx.ai_service.memory import hot_cache
@@ -478,7 +478,7 @@ async def compliance_soft_delete_redact(app_id: str, user_id: str, ids: list[int
         return 0
     redacted = json.dumps({"text": "[已删除]", "topic": ""}, ensure_ascii=False)
     tag = await memory_execute(
-        "UPDATE memory.agent_memory "
+        "UPDATE agent.agent_memory "
         "SET status = 3, active_slot = NULL, summary = '[已删除]', content = $1::jsonb "
         "WHERE id = ANY($2::bigint[]) AND app_id = $3 AND user_id = $4",
         redacted, [int(i) for i in ids], str(app_id), str(user_id),
@@ -491,7 +491,7 @@ async def compliance_soft_delete_redact(app_id: str, user_id: str, ids: list[int
 async def count_active(app_id: str, user_id: str) -> int:
     """删除校验用：该用户 active 记忆数（合规删除后应为 0，scope=all 时）。"""
     val = await memory_fetchval(
-        "SELECT COUNT(*) FROM memory.agent_memory WHERE app_id = $1 AND user_id = $2 AND status = 1",
+        "SELECT COUNT(*) FROM agent.agent_memory WHERE app_id = $1 AND user_id = $2 AND status = 1",
         str(app_id), str(user_id),
     )
     return int(val or 0)
@@ -506,7 +506,7 @@ async def get_by_memory_ids(
     if not memory_ids:
         return []
     rows = await memory_fetch(
-        f"SELECT {_ROW_COLS} FROM memory.agent_memory "
+        f"SELECT {_ROW_COLS} FROM agent.agent_memory "
         "WHERE app_id = $1 AND user_id = $2 AND memory_id = ANY($3::text[])",
         str(app_id), str(user_id), list(memory_ids),
     )
@@ -523,7 +523,7 @@ async def list_memories(
     limit: int = 200,
 ) -> list[MemoryEntry]:
     """按租户列出记忆（P2-7 ① 全貌查询；status≤0 表示不过滤状态看全部）。"""
-    sql = f"SELECT {_ROW_COLS} FROM memory.agent_memory WHERE app_id = $1 AND user_id = $2"
+    sql = f"SELECT {_ROW_COLS} FROM agent.agent_memory WHERE app_id = $1 AND user_id = $2"
     args: list = [str(app_id), str(user_id)]
     if status and int(status) > 0:
         args.append(int(status))
@@ -545,7 +545,7 @@ async def list_memories(
 async def count_warm_with_vector(app_id: str, user_id: str) -> int:
     """该租户 active warm 中已有向量的行数（重建后校验用）。"""
     val = await memory_fetchval(
-        "SELECT COUNT(*) FROM memory.agent_memory "
+        "SELECT COUNT(*) FROM agent.agent_memory "
         "WHERE app_id = $1 AND user_id = $2 AND memory_layer = 2 AND status = 1 "
         "AND embedding IS NOT NULL",
         str(app_id), str(user_id),
@@ -560,7 +560,7 @@ async def rebuild_warm_embeddings(app_id: str, user_id: str) -> tuple[int, int]:
     """
     from codegenx.ai_service.llm.embedding import get_embedding_client
     rows = await memory_fetch(
-        "SELECT id, summary, content FROM memory.agent_memory "
+        "SELECT id, summary, content FROM agent.agent_memory "
         "WHERE app_id = $1 AND user_id = $2 AND memory_layer = 2 AND status = 1",
         str(app_id), str(user_id),
     )
@@ -580,7 +580,7 @@ async def rebuild_warm_embeddings(app_id: str, user_id: str) -> tuple[int, int]:
     async with memory_transaction() as conn:
         for r, vec in zip(rows, vectors):
             await conn.execute(
-                "UPDATE memory.agent_memory SET embedding = $1::text::vector WHERE id = $2",
+                "UPDATE agent.agent_memory SET embedding = $1::text::vector WHERE id = $2",
                 vector_text(vec), int(r["id"]),
             )
             done += 1

@@ -7,12 +7,29 @@ from datetime import datetime
 from typing import Any
 
 from codegenx.ai_service.agent.agent_schema import AgentState
-from codegenx.ai_service.context.session_context import SessionContext
+from codegenx.ai_service.context.common_context import CommonContext
 from codegenx.ai_service.schema.ai_schema import UserAIRequest
 
 
 class TurnStoppedError(Exception):
     pass
+
+
+@dataclass
+class SubAgentInfo:
+    """子 agent 运行时观测元信息（dispatch_agent 生命周期登记）。
+
+    用途：SSE 进度/看板展示、防同名重复派发、运行态观测。
+    """
+    agent_name: str = ""
+    task_id: str = ""
+    started_at: float = 0.0
+    finished_at: float = 0.0
+    success: bool | None = None
+    message: str = ""
+    # 失败重试计数（仅作观测/leader 侧换派决策参考，dispatch 层不自动外重试）
+    retry_count: int = 0
+
 
 @dataclass
 class ActivateTurn:
@@ -28,6 +45,9 @@ class ActivateTurn:
     error_text: str = ""
     # 本轮各工具调用次数（tool_name → 次数；每个请求重建 ActivateTurn，天然按 turn 归零）
     tool_call_counts: dict[str, int] = field(default_factory=dict)
+    # 本轮派发的子 agent 运行时观测（dispatch_agent 登记生命周期）
+    # key=agent_name + task_id（防同轮同 agent 多次派发）
+    active_sub_agents: dict[str, SubAgentInfo] = field(default_factory=dict)
 
 
 def raise_if_stop_signal(session_state: RuntimeSessionState) -> None:
@@ -45,7 +65,7 @@ class RuntimeSessionState:
     """
     session_id: str
     request: UserAIRequest
-    context_manager: SessionContext | None = None  # 整个会话的上下文管理（由 on_session_start hook 初始化）
+    context: CommonContext | None = None  # 整个会话的上下文管理（由 on_session_start hook 初始化，运行时为 SessionContext）
     # P4 §10.3：会话归属智能体（请求 metadata.agent_name；空=默认智能体，现行为不变）
     agent_name: str = ""
 

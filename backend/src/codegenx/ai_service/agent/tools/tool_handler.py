@@ -128,14 +128,22 @@ class ToolRegistry(BaseComponent):
         else:
             return {"error": f"未知工具：{tool_name}"}
 
-    def build_tool(self) -> list[dict]:
-        """构建全量 function-calling 工具目录（不启用的工具已在注册时排除）。
+    def build_tools(
+        self,
+        allowlist: list[str] | None = None,
+        disabled: set[str] | None = None,
+    ) -> list[dict]:
+        """构建 function-calling 工具目录（先剔除运行时不可用，再按白名单裁剪）。
 
-        原为 async def 但体内无 await，改同步以适配 _resolve_tool_catalog 同步链路
-        （BaseReActAgent._prepare_agent 经 _resolve_tool_catalog 取目录）。
+        - disabled：平台总开关关闭 / 项目授权关闭的工具名，来自 agent.tool + agent.app_tool；
+          None 表示配置表不可用，降级为不额外过滤；
+        - allowlist：config agents[].tools 白名单，None=不裁剪，[]=该 agent 不开放工具。
         """
-        tool_catalog = self.tools
-
+        disabled_names = {str(n).strip() for n in (disabled or set()) if str(n).strip()}
+        candidates = [tool for tool in self.tools if tool.name not in disabled_names]
+        if allowlist is not None:
+            allowed = {str(n).strip() for n in allowlist if str(n).strip()}
+            candidates = [tool for tool in candidates if tool.name in allowed]
         return [
             {
                 "type": "function",
@@ -145,30 +153,7 @@ class ToolRegistry(BaseComponent):
                     "parameters": tool.parameters,
                 },
             }
-            for tool in tool_catalog or []
-        ]
-
-    
-
-    def build_agent_tools(self, allowlist: list[str] | None = None) -> list[dict]:
-        """按白名单构建 agent 的 function-calling 工具目录。
-
-        白名单非空 → 仅构建白名单内工具；空/None 表示该 agent 不启用工具（返回空列表）。
-        白名单来自 config.json agents[].tools，供 BaseReActAgent._prepare_agent 调用。
-        """
-        if not allowlist:
-            return []
-        names = {str(n).strip() for n in allowlist if str(n).strip()}
-        return [
-            {
-                "type": "function",
-                "function": {
-                    "name": tool.name,
-                    "description": tool.description,
-                    "parameters": tool.parameters,
-                },
-            }
-            for tool in self.tools if tool.name in names
+            for tool in candidates
         ]
 
 

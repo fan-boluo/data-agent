@@ -2,13 +2,19 @@ from codegenx.ai_service.context.common_context import CommonContext
 from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator
 
+@dataclass
 class SubContext(CommonContext):
     """专属于子智能体的上下文（一次性工作区，随 run 生灭）。
 
     与 SessionContext 的差异：无会话摘要水位、无快照/恢复;
     compact_after_step 级压缩直接走基类默认实现（Path B LLM 摘要）；
     leader 的会话级 Path A/水位逻辑对它无意义也不允许触达。
+
+    agent_name 为子智能体专属字段（不再放在 CommonContext 基类）：
+    leader 的归属在 RuntimeSessionState.agent_name，子智能体的归属在 SubContext 自身。
     """
+
+    agent_name: str = ""
 
     def init_chat_messages(self,user_msg:str) -> None:
         """初始化本轮对话工作列表：仅清空。

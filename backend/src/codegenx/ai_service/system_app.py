@@ -169,7 +169,7 @@ def initialize_components(app: SystemApp) -> None:
     构造知识留在组件模块内。注册顺序 = 启动广播顺序：
       llm → tools → tool_executor → skills → agents → context → session_io → tasks
       → memory → summary → compaction → chat_messages
-      → monitor_maintenance → memory_scheduler → session_pool → chat_service
+      → monitor_maintenance → retention_scheduler → memory_scheduler → session_pool → chat_service
     """
     if app._components_ready:
         return
@@ -212,6 +212,10 @@ def initialize_components(app: SystemApp) -> None:
 
     from codegenx.ai_service.trace.maintenance import initialize_trace_maintenance
     initialize_trace_maintenance(app)
+
+    # 过期数据统一清理（对话/链路/工具大输出/图表），每日执行
+    from codegenx.ai_service.schedule.retention import initialize_retention_scheduler
+    initialize_retention_scheduler(app)
 
     from codegenx.ai_service.schedule.memory import initialize_memory_scheduler
     initialize_memory_scheduler(app)

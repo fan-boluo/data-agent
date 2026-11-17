@@ -55,6 +55,7 @@ class ComponentType(str, Enum):
     CHAT_MESSAGE_STORE = "chat_message_store"
     TRACE_MAINTENANCE = "trace_maintenance"
     MEMORY_SCHEDULER = "memory_scheduler"
+    RETENTION_SCHEDULER = "retention_scheduler"
     CHAT_SERVICE = "chat_service"
     MESSAGE_BUS = "message_bus"
 

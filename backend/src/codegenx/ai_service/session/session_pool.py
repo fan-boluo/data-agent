@@ -1,4 +1,4 @@
-"""Session resource pool with automatic cleanup and LRU management."""
+﻿"""Session resource pool with automatic cleanup and LRU management."""
 from __future__ import annotations
 
 import asyncio
@@ -134,12 +134,11 @@ class SessionPool(BaseComponent):
                 session_id=session_id,
                 request=request,
             )
-            session.context_manager = SessionContext(
+            session.context = SessionContext(
                 session_id=session.session_id,
                 app_id=session.app_id,
                 user_id=session.user_id,
                 db_name=session.db_name,
-                agent_name=session.agent_name,
             )
 
             # 上次聊天消息到chat_message??
@@ -351,7 +350,7 @@ class SessionPool(BaseComponent):
                     # 留待任务结束后的下一轮 cleanup 再回收
                     if self._is_quiescent(session):
                         # 回收前保证摘要覆盖当前列表（fire-and-forget，后台任务持快照独立落盘）
-                        cm = getattr(session, "context_manager", None)
+                        cm = getattr(session, "context", None)
                         if cm is not None and getattr(cm, "chat_messages", None):
                             await cm.ensure_summary_before_unload()
                         sessions_to_remove.append(session_id)
@@ -369,7 +368,7 @@ class SessionPool(BaseComponent):
                     and idle_duration > self.swap_idle_seconds
                     and self._is_quiescent(session)
                 ):
-                    cm = getattr(session, "context_manager", None)
+                    cm = getattr(session, "context", None)
                     if cm is not None and cm.chat_messages:
                         # 卸载前保证摘要（fire-and-forget，后台任务持快照独立落盘）
                         await cm.ensure_summary_before_unload()
@@ -460,7 +459,7 @@ class SessionPool(BaseComponent):
                     status = "running"
                 else:
                     status = "idle"
-                ctx = getattr(session, "context_manager", None)
+                ctx = getattr(session, "context", None)
                 last_active = float(getattr(session, "last_activity_at", 0) or 0)
                 items.append(
                     {
@@ -482,3 +481,4 @@ class SessionPool(BaseComponent):
 def initialize_session_pool(system_app) -> SessionPool:
     """注册会话池组件（system_app.initialize_components 调用；关闭逆序保证会话池最后收尾）。"""
     return system_app.register(SessionPool)
+

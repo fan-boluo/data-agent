@@ -1,4 +1,4 @@
-"""
+﻿"""
 提炼触发两级漏斗（P1-2，设计方案 v2.1 §4.1）。
 
 第一级 · 轻量信号判断（每轮，成本极低，不调 LLM）：
@@ -191,7 +191,7 @@ async def memory_turn_signal(ctx: HookContext) -> None:
     """
     session = ctx.session
     try:
-        chat = (session.context_manager.chat_messages if session.context_manager else None) or []
+        chat = (session.context.chat_messages if session.context else None) or []
         round_messages = [m for m in chat[-2:] if isinstance(m, dict)]
         if not round_messages:
             return
@@ -204,6 +204,7 @@ async def memory_turn_signal(ctx: HookContext) -> None:
         )
     except Exception as exc:
         log.debug("记忆漏斗信号处理失败（非致命）: {}", exc)
+
 
 
 

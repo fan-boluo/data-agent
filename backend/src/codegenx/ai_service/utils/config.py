@@ -182,9 +182,26 @@ class ToolsConfig(Base):
         default=20,
         validation_alias=AliasChoices("maxCallsPerTool", "max_calls_per_tool"),
     )  # 同工具单请求调用次数上限（0=关闭；超限由 BEFORE_TOOL_CALL 配额守卫阻断）
+    execution_mode: str = Field(
+        default="parallel",
+        validation_alias=AliasChoices("executionMode", "execution_mode"),
+    )  # parallel=全部并行（默认），sequential=全部串行；dispatch_agent 两模式下都走 agent_slots
+    max_concurrency: int = Field(
+        default=5,
+        validation_alias=AliasChoices("maxConcurrency", "max_concurrency"),
+    )  # 进程级工具执行并发上限（含子 agent 内部工具，两级信号量隔离防死锁）
     # exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
     # restrict_to_workspace: bool = False  # If true, restrict all tool access to workspace directory
     # mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
+
+
+class RetentionConfig(Base):
+    """过期数据清理（schedule/retention.py 消费，每日执行一次）。"""
+    enabled: bool = True
+    interval_seconds: int = Field(
+        default=3600,
+        validation_alias=AliasChoices("intervalSeconds", "interval_seconds"),
+    )  # 调度检查间隔；命中"每天一次"才真正执行清理
 
 
 class SemanticConfig(Base):
@@ -399,9 +416,9 @@ class TraceConfig(Base):
         validation_alias=AliasChoices("flushBatchSize", "flush_batch_size"),
     )  # 落库攒批大小
     retention_days: int = Field(
-        default=90,
+        default=30,
         validation_alias=AliasChoices("retentionDays", "retention_days"),
-    )  # 数据保留天数（T2 清理任务消费）
+    )  # telemetry 数据保留天数（retention scheduler 消费）
     capture_content: bool = Field(
         default=True,
         validation_alias=AliasChoices("captureContent", "capture_content"),
@@ -484,6 +501,9 @@ class SessionConfig(Base):
     cleanup_interval_seconds: int = Field(default=300)  # 每隔 5 分钟进行一次闲置 session 清理
     swap_idle_seconds: int = Field(default=300)  # P3：闲置超过该秒数且无在途任务的会话卸载 chat_messages（须远小于 idle_timeout_seconds）
     grace_stop_seconds: int = Field(default=2.0)  # session中任务优雅停止时间
+    history_days: int = Field(default=7)  # 前端历史会话列表展示窗口（天，0=不限）
+    chat_message_days: int = Field(default=30)  # 对话消息保留期（仅删已被记忆提炼覆盖的行）
+    session_days: int = Field(default=30)  # 会话保留期：超期未更新的会话目录（含大输出）整体删除
 
 class MultiAgentsConfig(Base):
     """多Agent参数。"""
@@ -539,6 +559,14 @@ class CriticConfig(Base):
     )  # 答复短于此长度不审（寒暄/一句话直答）
 
 
+class GuardrailConfig(Base):
+    """输出护轨（P1-3：PII 脱敏 / 无依据数字检测 / 越权表名拦截，挂 AFTER_LLM_INVOKE）。"""
+    enabled: bool = True               # 总开关
+    pii_mask_enabled: bool = True      # 手机号/邮箱/身份证打码（就地改写答复）
+    ungrounded_number_check: bool = True  # 本轮无工具证据却输出统计数字 → 告警
+    cross_schema_check: bool = True    # 答复含 SQL 且引用非白名单 schema → 追加警示
+
+
 class Config(BaseSettings):
     agents: List[AgentConfig] = Field(default_factory=list)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
@@ -553,12 +581,14 @@ class Config(BaseSettings):
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     monitor:MonitorConfig = Field(default_factory=MonitorConfig)
     trace: TraceConfig = Field(default_factory=TraceConfig)
+    retention: RetentionConfig = Field(default_factory=RetentionConfig)
     compact: CompactConfig = Field(default_factory=CompactConfig)
     session: SessionConfig = Field(default_factory=SessionConfig)
     multi_agents: MultiAgentsConfig = Field(default_factory=MultiAgentsConfig)
     eval_config: EvalConfig = Field(default_factory=EvalConfig, alias="eval")
     hitl: HitlConfig = Field(default_factory=HitlConfig)
     critic: CriticConfig = Field(default_factory=CriticConfig)
+    guardrail: GuardrailConfig = Field(default_factory=GuardrailConfig)
 
     def get_default_agent(self) -> AgentConfig:
         if not self.agents:

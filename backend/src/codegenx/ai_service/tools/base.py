@@ -75,6 +75,12 @@ class ToolSession:
 
         return get_code_dir(self.user_id or "main", self.app_id or "main")
 
+    def output_dir(self) -> Path:
+        """系统产物目录（图表/报告）：工作区内专用子目录，与用户文件隔离。"""
+        from shared.constants import get_output_dir
+
+        return get_output_dir(self.user_id or "main", self.app_id or "main")
+
 
 class BaseTool(ABC):
 

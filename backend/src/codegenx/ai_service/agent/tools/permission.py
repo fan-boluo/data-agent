@@ -1,4 +1,4 @@
-"""工具调用许可判定（默认模式：规则链，命中 deny 即阻断）。
+﻿"""工具调用许可判定（默认模式：规则链，命中 deny 即阻断）。
 
 设计约定：
 - 每条规则是纯同步判定（无 IO），返回 None 表示放行，返回 deny 决定则立即阻断；
@@ -111,7 +111,7 @@ def rule_call_quota(ctx: PermissionContext) -> PermissionDecision | None:
 
 
 def _safe_paths(session: "RuntimeSessionState | None") -> list[Path]:
-    context = getattr(session, "context_manager", None) if session is not None else None
+    context = getattr(session, "context", None) if session is not None else None
     if not context:
         return []
     return [Path(path).resolve() for path in context.metadata.safety_path]
@@ -184,3 +184,4 @@ class PermissionManager:
             if decision is not None:
                 return decision
         return PermissionDecision()
+

@@ -1,4 +1,4 @@
-"""TaskBoardCoordinator —— 看板协调器
+﻿"""TaskBoardCoordinator —— 看板协调器
 集中全部看板确定性操作（无 LLM 参与）。agent-as-tool 同步派发后看板语义收窄
 为「计划任务看板」：登记与闭环只服务计划链路（planner 登记的 depends_on DAG
 解锁握手）；普通派发不再登记看板（无隐式副作用），LLM 经 task_create/update/
@@ -156,8 +156,9 @@ class TaskBoardCoordinator:
         每次 think 前刷新：turn 过程中任务在完成、依赖在解锁，需最新就绪集
         （planner 登记的计划任务同样经此呈现，lead agent 据此自主决定执行方式）。
         """
-        cm = getattr(session_state, "context_manager", None)
+        cm = getattr(session_state, "context", None)
         if cm is None:
             return "（暂无任务看板）"
         cm.refresh_task_prompt(str(getattr(session_state, "request_id", "") or ""))
         return cm.prompts.task_prompt or "（暂无任务看板）"
+

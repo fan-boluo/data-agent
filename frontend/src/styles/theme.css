@@ -49,8 +49,8 @@
   --header-height: 64px;
 
   /* 页面容器模板：内容页统一页边距，根节点引用 .page-shell 即可 */
-  --page-padding-x: 24px;
-  --page-padding-y: 24px;
+  --page-padding-x: 16px;
+  --page-padding-y: 16px;
 }
 
 /* Global Reset */

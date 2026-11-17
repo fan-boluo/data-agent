@@ -6,7 +6,7 @@ codegenx.ai_service.memory — 记忆系统（跨会话持久记忆，v2）。
   - 本包只负责跨会话的持久记忆：hot（核心约束，每轮全量注入）+ warm（历史经验，按需召回）。
 
 数据架构（详见 docs/Agent记忆系统设计方案v2.md）：
-  PostgreSQL memory.agent_memory 为唯一真源（hot/warm 同表分层 memory_layer=1/2），
+  PostgreSQL agent.agent_memory 为唯一真源（hot/warm 同表分层 memory_layer=1/2），
   向量即同表 embedding 列（pgvector HNSW，warm 行非空），json 文件仅为迁移源；
   单库单表消除了「行与向量分叉」这一整类故障，不再有同步队列与双源对账。
   离线任务统一走 memory_task 表队列（at-least-once）：

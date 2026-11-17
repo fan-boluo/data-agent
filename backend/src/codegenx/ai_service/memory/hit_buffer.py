@@ -52,7 +52,7 @@ async def _fallback_direct(app_id: str, user_id: str, memory_ids: list[str]) -> 
         from db.postgres.postgres_client import memory_fetch
         from codegenx.ai_service.memory.memory_store import batch_touch_hit
         rows = await memory_fetch(
-            "SELECT id FROM memory.agent_memory "
+            "SELECT id FROM agent.agent_memory "
             "WHERE app_id = $1 AND user_id = $2 AND memory_id = ANY($3::text[])",
             str(app_id), str(user_id), list(memory_ids),
         )
