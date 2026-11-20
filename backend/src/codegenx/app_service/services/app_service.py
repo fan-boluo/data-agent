@@ -13,7 +13,7 @@ from sqlalchemy import delete, desc, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared import log
-from shared.constants import PYTHON_ENV, get_code_dir
+from shared.constants import MAX_DOWNLOAD_FILE_SIZE, PYTHON_ENV, get_code_dir
 from shared.exceptions.error_code import ErrorCode
 from shared.exceptions.throw_utils import ThrowUtils
 from codegenx.app_service.orm.app import App
@@ -261,6 +261,24 @@ class AppService:
                     content.append(line)
             return "".join(content) + "[文件超过500KB，仅展示前50行]"
         return target.read_text(encoding="utf-8", errors="replace")
+
+    async def download_code_file(self, app_id: str, file_path: str, login_user: JWTUser) -> Path:
+        """下载单个源码文件：校验路径、存在性与大小上限，返回文件绝对路径。"""
+        app = await self._get_participant_app(app_id, login_user)
+        code_dir = get_code_dir(login_user.user_id, app.id).resolve()
+        target = (code_dir / file_path).resolve()
+        code_dir_str = str(code_dir)
+        target_str = str(target)
+        if not (target_str == code_dir_str or target_str.startswith(code_dir_str + os.sep)):
+            ThrowUtils.throw_if(True, ErrorCode.PARAMS_ERROR, "路径无效")
+        ThrowUtils.throw_if(not target.exists() or not target.is_file(), ErrorCode.NOT_FOUND_ERROR, "文件不存在")
+        # 超过 20MB 提示用户缩减文件大小
+        ThrowUtils.throw_if(
+            target.stat().st_size > MAX_DOWNLOAD_FILE_SIZE,
+            ErrorCode.PARAMS_ERROR,
+            "文件大小超过20MB，请缩减文件大小后重试",
+        )
+        return target
 
     async def save_code_file(self, app_id: str, file_path: str, content: str, login_user: JWTUser) -> bool:
         app = await self._get_participant_app(app_id, login_user)

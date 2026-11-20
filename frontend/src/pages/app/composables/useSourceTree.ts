@@ -300,6 +300,36 @@ export function useSourceTree(options: UseSourceTreeOptions) {
     }
   }
 
+  // 下载选中文件（大小限制由后端 app_service 校验，超限返回提示文案）
+  const downloadSelectedFile = async () => {
+    const node = selectedFileNode.value
+    if (!node || node.dataRef?.type !== 'file') return
+    try {
+      const baseURL = request.defaults.baseURL || API_BASE_URL
+      const res = await request.get(`${baseURL}/api/app/code/file/download/${appId.value}`, {
+        params: { path: node.key },
+        responseType: 'blob',
+      })
+      const blob = res.data as Blob
+      // 业务校验失败时后端返回 JSON，解析出提示文案
+      if (blob.type.includes('application/json')) {
+        const payload = JSON.parse(await blob.text())
+        message.error(payload.message || '下载失败')
+        return
+      }
+      const url = window.URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = node.title
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      window.URL.revokeObjectURL(url)
+    } catch (error: any) {
+      message.error('下载失败：' + (error.message || '未知错误'))
+    }
+  }
+
   const deleteSelectedNode = () => {
     const node = selectedFileNode.value
     if (!node) return
@@ -364,6 +394,7 @@ export function useSourceTree(options: UseSourceTreeOptions) {
     openRenameModal,
     doRename,
     triggerFileUpload,
+    downloadSelectedFile,
     deleteSelectedNode,
   }
 }

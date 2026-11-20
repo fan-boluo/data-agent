@@ -11,7 +11,9 @@
   子 agent 不能再派发子 agent，嵌套深度恒为 1，不会环形死锁。
 - 同批参数相同的 tool_call 复用同一份执行结果（parallel 用 asyncio.Task 缓存防竞态，
   sequential 用普通 dict 即可）。
-- 停止信号（TurnStoppedError/CancelledError）透传终止请求，不吞成工具失败。
+- 停止信号（TurnStoppedError/CancelledError）透传终止请求，不吞成工具失败；
+  工具执行统一走 `_await_with_stop`，停止时取消工具任务，长耗时工具（SQL/pandas）
+  无需各自轮询 signal 也能被中断。
 """
 
 from __future__ import annotations
@@ -231,6 +233,40 @@ class ToolExecutor(BaseComponent):
             })
         return results
 
+    # ------------------------------------------------------------------ 停止感知等待
+    async def _await_with_stop(
+        self, awaitable: Any, stop_signal: Any,
+        timeout: float | None, stop_reason: str = "",
+    ) -> Any:
+        """等待工具结果，同时监听停止信号：工具内不必各自轮询 signal。
+
+        - 工具先完成：返回结果（异常原样抛出，含工具自身抛的 TurnStoppedError）；
+        - 停止先到：取消工具任务并抛 TurnStoppedError（asyncpg 取消查询、线程任务被丢弃）；
+        - 等待超时：取消工具任务并抛 TimeoutError（行为与原 wait_for 一致）。
+        """
+        tool_task = asyncio.ensure_future(awaitable)
+        stop_task: asyncio.Task | None = None
+        if stop_signal is not None and hasattr(stop_signal, "wait"):
+            stop_task = asyncio.create_task(stop_signal.wait())
+        waiters = [t for t in (tool_task, stop_task) if t is not None]
+        try:
+            done, _ = await asyncio.wait(
+                waiters, timeout=timeout, return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            # 工具先结束时回收未触发的等待任务
+            if stop_task is not None and not stop_task.done():
+                stop_task.cancel()
+
+        if tool_task in done:
+            return tool_task.result()
+        # 停止/超时：取消工具；回调里消费结果，避免 "Task exception was never retrieved"
+        tool_task.cancel()
+        tool_task.add_done_callback(lambda t: t.cancelled() or t.exception())
+        if stop_task is not None and stop_task in done:
+            raise TurnStoppedError(stop_reason or "user-stop")
+        raise asyncio.TimeoutError()
+
     # ------------------------------------------------------------------ 单工具执行入口
     async def execute(self, tool_call: dict[str, Any],
                       session_state: RuntimeSessionState) -> ToolResult:
@@ -249,6 +285,10 @@ class ToolExecutor(BaseComponent):
         session_id = getattr(session_state, "session_id", "")
         stop_signal = getattr(session_state, "stop_signal", None)
         tool_call_id = str(tool_call.get("id") or "")
+
+        # 已收到停止信号：不再启动新工具，直接终止本轮
+        if stop_signal is not None and stop_signal.is_set():
+            raise TurnStoppedError(str(getattr(session_state, "stop_reason", "") or "user-stop"))
 
         # 1. BEFORE_TOOL_CALL 守卫（入参注入后触发，守卫能看到完整参数）
         turn = getattr(session_state, "activate_turn", None)
@@ -316,7 +356,11 @@ class ToolExecutor(BaseComponent):
                 try:
                     result = func(**call_kwargs)
                     if inspect.isawaitable(result):
-                        result = await asyncio.wait_for(result, timeout)
+                        # 统一停止感知：停止信号优先于工具执行完成，长耗时工具可被中断
+                        result = await self._await_with_stop(
+                            result, stop_signal, timeout,
+                            stop_reason=str(getattr(session_state, "stop_reason", "") or ""),
+                        )
                 except (TurnStoppedError, asyncio.CancelledError):
                     await release_slot(tool_name)  # 取消无结果：归还半开探测名额
                     raise

@@ -313,6 +313,23 @@ async def get_app_code_file(
         raise _system_error(exc) from exc
 
 
+@router.get("/code/file/download/{app_id}")
+async def download_app_code_file(
+    app_id: str,
+    path: str = Query(...),
+    current_user: JWTUser = Depends(require_login),
+    db: AsyncSession = Depends(get_db_session),
+):
+    try:
+        file_path = await AppService(db).download_code_file(app_id, path, current_user)
+        return FileResponse(path=str(file_path), filename=file_path.name, media_type="application/octet-stream")
+    except BusinessException:
+        raise
+    except Exception as exc:
+        log.exception("download app code file failed appId={} path={}", app_id, path)
+        raise _system_error(exc) from exc
+
+
 @router.post("/code/file/{app_id}", response_model=BaseResponse[bool])
 async def save_app_code_file(
     app_id: str,

@@ -53,6 +53,11 @@
               <template #icon><UploadOutlined /></template>
             </a-button>
           </a-tooltip>
+          <a-tooltip title="下载文件">
+            <a-button type="text" size="small" :disabled="!isFileNodeSelected" @click="downloadSelectedFile">
+              <template #icon><DownloadOutlined /></template>
+            </a-button>
+          </a-tooltip>
           <a-tooltip title="重命名">
             <a-button type="text" size="small" :disabled="!selectedFileNode" @click="openRenameModal">
               <template #icon><EditOutlined /></template>
@@ -387,6 +392,7 @@ import {
   CloseOutlined,
   DatabaseOutlined,
   DeleteOutlined,
+  DownloadOutlined,
   EditOutlined,
   FileAddOutlined,
   FileTextOutlined,
@@ -494,13 +500,16 @@ const {
   sidePanelTab, sidePanelVisible, sourceFileTree, dbTables, loadingDbTables, dbTableTree,
   loadingSourceTree, selectedFileNode, selectedNodeKey, switchSidePanel,
   openCreateFileModal, openCreateFolderModal, doCreateFile, doCreateFolder,
-  openRenameModal, doRename, triggerFileUpload, deleteSelectedNode,
+  openRenameModal, doRename, triggerFileUpload, downloadSelectedFile, deleteSelectedNode,
   createFileModalVisible, createFolderModalVisible, newItemName, newItemParentPath,
   fileOpLoading, renameModalVisible, renameNewName,
 } = sourceTree
 const { isGenerating, isStoppingGeneration, sendMessage, stopGeneration, abortController } = chatStream
 
 // 侧栏树节点事件（页面负责源码树域与页签域的联动转发）
+// 下载按钮仅在选中文件（非文件夹）时可用
+const isFileNodeSelected = computed(() => selectedFileNode.value?.dataRef?.type === 'file')
+
 const handleTreeNodeSelect = (_keys: string[], { node }: any) => {
   sourceTree.selectTreeNode(node)
 }

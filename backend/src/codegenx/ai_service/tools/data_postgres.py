@@ -616,14 +616,14 @@ class DescribeTableStatsTool(BaseTool):
         self, params: dict, signal: asyncio.Event | None = None,
     ) -> ToolResult:
         try:
-            return await self._do_execute(params)
+            return await self._do_execute(params,signal)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             log.warning("describe_table_stats 执行异常: {}", exc)
             return ToolResult(success=False, message=f"获取统计信息失败: {exc}")
 
-    async def _do_execute(self, params: dict) -> ToolResult:
+    async def _do_execute(self, params: dict,signal: asyncio.Event|None ) -> ToolResult:
         from codegenx.ai_service.data_analysis.stats_engine import (
             compute_numeric_stats, compute_categorical_stats,
             compute_correlation, format_numeric_stats,
